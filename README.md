@@ -1,2 +1,256 @@
 # diyllmbenchmark
-diyllmbenchmark
+
+`diyllmbenchmark` 是一個針對本地 OpenAI-compatible LLM 服務的互動式 benchmark 工具，目前支援：
+
+- `Ollama`
+- `llama.cpp` 的 `llama-server`
+
+它會把你選的模型與參數組合逐一送測，量測串流輸出表現，最後產生報告、圖表、原始輸出與最佳設定摘要，適合用來比較不同模型或不同推論參數的實際效果。
+
+## 這個工具能做什麼
+
+- 比較多個模型在相同 prompt 下的表現
+- 比較不同參數組合對速度與輸出型態的影響
+- 支援兩種 benchmark 模式：
+  - `chat`：一般文字回覆 benchmark
+  - `tools`：檢查模型是否真的會輸出 `tool_calls`
+- 自動產生 Markdown 報告、PNG 圖表、JSONL 原始結果
+- 若有 NVIDIA GPU 且系統可執行 `nvidia-smi`，會額外記錄 VRAM 使用量
+- 若後端有暴露 reasoning / thinking 類型欄位，會一併保留在報告中
+
+## 安裝需求
+
+先準備好：
+
+- 可執行 `python` 的環境
+- 已啟動的本地 LLM 服務
+  - `Ollama` 預設使用 `http://localhost:11434/v1`
+  - `llama.cpp` 預設使用 `http://localhost:8080/v1`
+- 可選：`nvidia-smi`
+  - 若可用，報告會顯示 VRAM 指標
+  - 若不可用，VRAM 欄位會顯示 `N/A`
+
+安裝 Python 套件：
+
+```bash
+pip install openai pandas matplotlib questionary requests tabulate
+```
+
+## 快速開始
+
+1. 啟動你的本地 LLM 後端。
+
+   Ollama 範例：
+
+   ```bash
+   ollama serve
+   ```
+
+   llama.cpp 範例：
+
+   ```bash
+   llama-server --port 8080
+   ```
+
+2. 執行 benchmark：
+
+   ```bash
+   python ollama_expert_bench_V3.py
+   ```
+
+3. 依照互動式選單完成設定。
+
+這個工具目前是互動式操作，沒有命令列參數介面；所有設定都是在執行後逐步選擇。
+
+## 使用流程
+
+執行後，程式會依序詢問：
+
+1. 後端類型
+   - `Ollama`
+   - `llama.cpp (llama-server)`
+2. Benchmark 模式
+   - `chat`
+   - `tools`
+3. 模型
+   - `Ollama` 會先嘗試從 `/api/tags` 自動抓模型清單
+   - 抓不到時可手動輸入模型名稱
+   - `llama.cpp` 需手動輸入 port 與模型名稱
+4. 要測的參數群組
+   - 可不選；不選時代表只比較模型預設值
+5. 各參數的測試值
+   - 以逗號分隔，例如 `0.1, 0.8`
+6. 測試 prompt
+
+程式會把你輸入的所有參數值做笛卡兒積組合，所以總測試次數為：
+
+`模型數量 x 參數組合數`
+
+如果沒有選任何參數，就只會以各模型目前預設設定各跑一次。
+
+## Benchmark 模式說明
+
+### `chat` 模式
+
+用來測一般文字輸出效能，主要觀察：
+
+- `TPS`
+- `TTFT`
+- `Stream Duration`
+- `Output Category = normal_content`
+
+這個模式適合拿來看哪個模型或哪組參數「回得比較快」。
+
+### `tools` 模式
+
+這個模式會在 request 中附上一個測試用工具：
+
+- `lookup_weather`
+
+並要求模型先呼叫工具，而不是直接回答。這個模式主要看：
+
+- 是否真的回傳 `tool_calls`
+- `First Event (s)`
+- `Stream Duration`
+
+在 `tools` 模式中，成功結果不一定會輸出文字，所以 `TPS` 與 `TTFT` 可能是 `N/A`；這是正常的，判讀時請優先看：
+
+- `Output Category = tool_call`
+- `First Event (s)`
+
+注意：這裡 benchmark 的是「模型有沒有發出 tool call」，不是實際去執行天氣查詢。
+
+## 可調參數
+
+程式內建以下參數，且會依後端自動過濾可用項目：
+
+| 參數 | 支援後端 | 用途 |
+| --- | --- | --- |
+| `temperature` | `ollama`, `llama.cpp` | 控制創意與穩定度 |
+| `num_ctx` | `ollama` | 上下文長度，常影響長文能力與 TTFT |
+| `num_predict` | `ollama`, `llama.cpp` | 最大生成 token 數 |
+| `top_p` | `ollama`, `llama.cpp` | 核心採樣，降低時通常更保守 |
+| `min_p` | `ollama`, `llama.cpp` | 過濾低機率 token |
+| `repeat_penalty` | `ollama`, `llama.cpp` | 降低重複輸出 |
+| `num_gpu` | `ollama` | GPU 卸載相關設定，常明顯影響速度 |
+
+參數群組如下：
+
+- `生成核心`：`temperature`、`num_ctx`、`num_predict`
+- `採樣與懲罰`：`top_p`、`min_p`、`repeat_penalty`
+- `硬體與部署`：`num_gpu`
+
+## 後端設定差異
+
+### Ollama
+
+- 會固定使用 `http://localhost:11434/v1`
+- 會先嘗試自動列出本機模型
+- 參數會以 Ollama 對應名稱送進 `options`
+- 若有成功結果，會額外輸出 `Ollama_Modelfile_Suggest`
+
+### llama.cpp
+
+- 需先自行啟動 `llama-server`
+- 預設 port 是 `8080`
+- 模型名稱只作為報告辨識用途，不會替你載入模型
+- `num_predict` 會映射為 `n_predict`
+
+## 產出檔案
+
+Benchmark 完成後，會在專案目錄下看到以下檔案：
+
+- `bench_{backend}_{capability}_{timestamp}.md`
+  - 完整 Markdown 報告
+- `bench_{backend}_{capability}_{timestamp}.png`
+  - 圖表輸出
+  - 若沒有可繪圖的成功結果，可能不會產生
+- `bench_{backend}_{capability}_{timestamp}_outputs.jsonl`
+  - 每次 run 的原始結果，適合後續再分析
+- `best_config.json`
+  - 本次 benchmark 選出的最佳配置
+  - 若沒有成功結果，則不會產生
+- `Ollama_Modelfile_Suggest`
+  - 僅在最佳結果來自 `Ollama` 時產生
+
+## `best_config.json` 怎麼選
+
+工具會依模式自動選最佳結果：
+
+- `chat` 模式
+  - 優先選 `TPS` 最高者
+  - 若沒有可用 `TPS`，則選 `TTFT` 最低者
+- `tools` 模式
+  - 優先選 `First Event (s)` 最低者
+  - 若沒有可用 `First Event`，則選 `Stream Duration` 最短者
+
+## 報告中的重要欄位
+
+- `TPS (chunk/s)`
+  - 以有文字內容的串流 chunk 估算吞吐量，適合做相對比較
+- `TTFT (s)`
+  - 從送出 request 到收到第一段文字的時間
+- `First Event (s)`
+  - 從送出 request 到收到第一個串流事件的時間，包含非文字事件
+- `VRAM Peak (MiB)`
+  - 測試期間觀察到的最高顯存占用
+- `Efficiency Score`
+  - `TPS / VRAM Peak (GiB)`，用來看單位顯存效率
+
+## 輸出分類
+
+報告裡常見的 `Output Category`：
+
+- `normal_content`
+  - 正常收到文字輸出
+- `tool_call`
+  - 在 `tools` 模式下，成功收到 `tool_calls`
+- `text_reply_without_tool`
+  - 模型直接回答了，但沒有呼叫工具
+- `empty_reply`
+  - 串流正常結束，但沒有文字內容
+- `non_content_stream`
+  - 串流只有非文字 payload
+- `early_stop`
+  - 串流提早中斷
+
+## thinking / dialogue_output 保留機制
+
+若後端串流資料中有額外 reasoning 或 thinking 欄位，工具會嘗試保留：
+
+- `thinking`
+  - 從 reasoning / thinking 類欄位整理出的文字
+- `dialogue_output`
+  - 一般文字回覆內容
+
+這些內容會寫進：
+
+- Markdown 報告
+- JSONL 原始輸出
+
+如果某次 run 沒有這些內容，報告中會標示為 `none` 或留空。
+
+## 測試
+
+目前有一份針對串流分類邏輯的單元測試：
+
+```bash
+python -m unittest test_stream_classification.py
+```
+
+它主要驗證：
+
+- 正常文字串流分類
+- 空回覆與中斷情境
+- `tools` 模式下的 `tool_call` 判定
+- reasoning / thinking 欄位萃取
+- 報告摘要對 `N/A` 欄位的輸出
+
+## 注意事項
+
+- 這個專案目前以互動式操作為主，沒有 CLI 參數模式
+- 所有 benchmark 都是透過 OpenAI-compatible `/v1/chat/completions` 介面發送
+- `tools` 模式目前內建的工具只有 `lookup_weather`
+- `Ollama` 的模型清單抓不到時，不代表後端不能用，只是需要手動輸入模型名
+- `llama.cpp` 的模型名稱欄位只用來標記報告，不會幫你載入模型
+

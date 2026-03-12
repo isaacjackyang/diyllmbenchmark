@@ -3093,6 +3093,8 @@ def save_markdown_report(df, config, report_stem):
             if not thinking_text and not dialogue_output_text:
                 file.write("\n_No retained thinking or dialogue output text for this run._\n")
 
+    return report_path
+
 
 if __name__ == "__main__":
     try:
