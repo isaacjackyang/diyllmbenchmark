@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import pandas as pd
 
 
-MODULE_PATH = Path(__file__).with_name("ollama_expert_bench_V3.py")
+MODULE_CANDIDATES = [
+    Path(__file__).with_name("ollama_expert_bench_V5.py"),
+    Path(__file__).with_name("ollama_expert_bench_V3.py"),
+]
+MODULE_PATH = next((path for path in MODULE_CANDIDATES if path.exists()), MODULE_CANDIDATES[0])
 MODULE_SPEC = importlib.util.spec_from_file_location("bench_v3", MODULE_PATH)
 bench_v3 = importlib.util.module_from_spec(MODULE_SPEC)
 MODULE_SPEC.loader.exec_module(bench_v3)
@@ -53,6 +57,7 @@ def classify_chunks(chunks, error_message=None):
     start_time = 100.0
     first_event_time = None
     first_content_time = None
+    first_thinking_time = None
     chunk_records = []
 
     for index, chunk in enumerate(chunks, start=1):
@@ -65,6 +70,8 @@ def classify_chunks(chunks, error_message=None):
 
         if chunk_info["content"] and first_content_time is None:
             first_content_time = event_time
+        if chunk_info.get("thinking") and first_thinking_time is None:
+            first_thinking_time = event_time
 
     end_time = start_time + ((len(chunks) + 1) * 0.2 if chunks else 0.5)
     return bench_v3.classify_stream_result(
@@ -73,6 +80,7 @@ def classify_chunks(chunks, error_message=None):
         end_time=end_time,
         first_event_time=first_event_time,
         first_content_time=first_content_time,
+        first_thinking_time=first_thinking_time,
         error_message=error_message,
     )
 
@@ -178,6 +186,20 @@ class StreamClassificationTests(unittest.TestCase):
         self.assertIsNotNone(result["TTFT"])
         self.assertIsNotNone(result["TPS"])
 
+    def test_thinking_and_output_metrics_are_captured(self):
+        result = classify_chunks(
+            [
+                make_chunk(reasoning=[{"text": "abc"}]),
+                make_chunk(content="hello", finish_reason="stop"),
+            ]
+        )
+
+        self.assertEqual(result["Thinking_Chars"], 3)
+        self.assertEqual(result["Output_Chars"], 5)
+        self.assertEqual(result["Output_Thinking_Ratio"], 1.667)
+        self.assertEqual(result["Thinking_TPS"], 7.5)
+        self.assertEqual(result["Output_TPS"], 25.0)
+
     def test_summary_and_report_show_na_for_zero_output(self):
         df = pd.DataFrame(
             [
@@ -205,6 +227,13 @@ class StreamClassificationTests(unittest.TestCase):
                     "VRAM_Delta_MiB": 0,
                     "VRAM_Detail": "GPU 0 demo: 1000 -> 1000 / 16384 MiB (+0 MiB)",
                     "Efficiency_Score": None,
+                    "Thinking_TPS": None,
+                    "Output_TPS": None,
+                    "Output_Thinking_Ratio": None,
+                    "Thinking_Chars": 0,
+                    "Thinking_Text": "",
+                    "Dialogue_Output_Chars": 0,
+                    "Dialogue_Output_Text": "",
                     "Output_Chars": 0,
                     "Output_Text": "",
                     "Error": "",
@@ -214,6 +243,9 @@ class StreamClassificationTests(unittest.TestCase):
 
         summary_df = bench_v3.build_summary_dataframe(df)
         self.assertEqual(summary_df.loc[0, "TPS (chunk/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Thinking TPS (char/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Output TPS (char/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Output/Thinking Ratio"], "N/A")
         self.assertEqual(summary_df.loc[0, "TTFT (s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Output Category"], "empty_reply")
 
@@ -231,6 +263,9 @@ class StreamClassificationTests(unittest.TestCase):
         self.assertIn("Output Category: empty_reply", report_text)
         self.assertIn("Diagnosis:", report_text)
         self.assertIn("TPS: N/A chunk/s", report_text)
+        self.assertIn("Thinking TPS: N/A char/s", report_text)
+        self.assertIn("Output TPS: N/A char/s", report_text)
+        self.assertIn("Output/Thinking Ratio: N/A", report_text)
         self.assertIn("TTFT: N/A s", report_text)
 
     def test_filter_eligible_results_excludes_warning_and_error_rows(self):

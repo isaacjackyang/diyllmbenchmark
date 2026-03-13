@@ -3,15 +3,52 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
+try:
+    from importlib.metadata import PackageNotFoundError, version as get_package_version
+except Exception:
+    class PackageNotFoundError(Exception):
+        pass
+
+    def get_package_version(_package_name):
+        raise PackageNotFoundError
+
 from itertools import product
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import questionary
-import requests
-from openai import OpenAI
-from questionary import Choice
+DEPENDENCY_IMPORT_ERRORS = {}
+
+try:
+    import matplotlib.pyplot as plt
+except Exception as exc:
+    plt = None
+    DEPENDENCY_IMPORT_ERRORS["matplotlib"] = exc
+
+try:
+    import pandas as pd
+except Exception as exc:
+    pd = None
+    DEPENDENCY_IMPORT_ERRORS["pandas"] = exc
+
+try:
+    import questionary
+    from questionary import Choice
+except Exception as exc:
+    questionary = None
+    Choice = None
+    DEPENDENCY_IMPORT_ERRORS["questionary"] = exc
+
+try:
+    import requests
+except Exception as exc:
+    requests = None
+    DEPENDENCY_IMPORT_ERRORS["requests"] = exc
+
+try:
+    from openai import OpenAI
+except Exception as exc:
+    OpenAI = None
+    DEPENDENCY_IMPORT_ERRORS["openai"] = exc
 
 try:
     import msvcrt
@@ -324,6 +361,12 @@ def format_numeric_value(value, digits):
     return f"{float(value):.{digits}f}"
 
 
+def format_probability_value(value, digits=1):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{float(value) * 100:.{digits}f}%"
+
+
 def format_text_value(value, default="N/A"):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return default
@@ -338,6 +381,26 @@ def calculate_efficiency_score(tps, vram_peak_mib):
         return None
     score = tps / (vram_peak_mib / 1024)
     return round(score, 3)
+
+
+def calculate_text_tps(char_count, first_text_time, end_time):
+    if char_count is None or pd.isna(char_count) or char_count <= 0:
+        return None
+    if first_text_time is None or end_time is None:
+        return None
+
+    generation_time = end_time - first_text_time
+    if generation_time <= 0:
+        return 0.0
+    return round(char_count / generation_time, 2)
+
+
+def calculate_output_thinking_ratio(output_chars, thinking_chars):
+    if thinking_chars is None or pd.isna(thinking_chars) or thinking_chars <= 0:
+        return None
+    if output_chars is None or pd.isna(output_chars):
+        return None
+    return round(output_chars / thinking_chars, 3)
 
 
 def normalize_text_content(value):
@@ -429,17 +492,25 @@ def classify_stream_result(
     end_time,
     first_event_time=None,
     first_content_time=None,
+    first_thinking_time=None,
     error_message=None,
 ):
     total_chunks = len(chunk_records)
     content_chunks = 0
+    thinking_chunks = 0
     non_content_chunks = 0
     non_content_types = set()
     finish_reason = None
+    output_chars = 0
+    thinking_chars = 0
 
     for record in chunk_records:
         if record["content"]:
             content_chunks += 1
+            output_chars += len(record["content"])
+        if record.get("thinking"):
+            thinking_chunks += 1
+            thinking_chars += len(record["thinking"])
         if record["non_content_types"]:
             non_content_chunks += 1
             non_content_types.update(record["non_content_types"])
@@ -499,12 +570,18 @@ def classify_stream_result(
         "Finish_Reason": finish_reason,
         "Total_Chunks": total_chunks,
         "Content_Chunks": content_chunks,
+        "Thinking_Chunks": thinking_chunks,
         "Non_Content_Chunks": non_content_chunks,
         "Non_Content_Types": ", ".join(sorted(non_content_types)) if non_content_types else "none",
         "First_Event_s": first_event_seconds,
         "Stream_Duration_s": stream_duration_seconds,
         "TTFT": ttft,
         "TPS": tps,
+        "Thinking_Chars": thinking_chars,
+        "Output_Chars": output_chars,
+        "Thinking_TPS": calculate_text_tps(thinking_chars, first_thinking_time, end_time),
+        "Output_TPS": calculate_text_tps(output_chars, first_content_time, end_time),
+        "Output_Thinking_Ratio": calculate_output_thinking_ratio(output_chars, thinking_chars),
     }
 
 
@@ -566,6 +643,56 @@ def build_outcome_summary_dataframe(df):
         .reset_index(name="Count")
     )
     return outcome_df
+
+
+def build_tool_call_success_summary_dataframe(df):
+    if df.empty or "Model" not in df.columns:
+        return pd.DataFrame(
+            columns=[
+                "Model",
+                "Total Runs",
+                "Tool Call Success Count",
+                "Tool Call Success Probability",
+            ]
+        )
+
+    summary_rows = []
+    for model, group in df.groupby("Model", dropna=False, sort=True):
+        total_runs = int(len(group))
+        success_count = int(
+            ((group["Status"] == "ok") & (group["Output_Category"] == "tool_call")).sum()
+        )
+        success_probability = success_count / total_runs if total_runs else None
+        summary_rows.append(
+            {
+                "Model": model,
+                "Total Runs": total_runs,
+                "Tool Call Success Count": success_count,
+                "Tool Call Success Probability": format_probability_value(success_probability),
+            }
+        )
+
+    return pd.DataFrame(summary_rows)
+
+
+def wrap_markdown_table_headers(df):
+    header_map = {
+        "Output Category": "Output<br>Category",
+        "Finish Reason": "Finish<br>Reason",
+        "TPS (chunk/s)": "TPS<br>(chunk/s)",
+        "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)",
+        "Output TPS (char/s)": "Output TPS<br>(char/s)",
+        "Output/Thinking Ratio": "Output/Thinking<br>Ratio",
+        "TTFT (s)": "TTFT<br>(s)",
+        "First Event (s)": "First Event<br>(s)",
+        "VRAM Peak (MiB)": "VRAM Peak<br>(MiB)",
+        "Efficiency Score (TPS/GiB Peak)": "Efficiency Score<br>(TPS/GiB Peak)",
+        "Chunks (content/total)": "Chunks<br>(content/total)",
+        "Total Runs": "Total<br>Runs",
+        "Tool Call Success Count": "Tool Call Success<br>Count",
+        "Tool Call Success Probability": "Tool Call Success<br>Probability",
+    }
+    return df.rename(columns=header_map)
 
 
 def summarize_vram_samples(samples):
@@ -663,6 +790,11 @@ class NvidiaVRAMMonitor:
 
 
 def build_summary_dataframe(df):
+    summary_source = df.copy()
+    for column_name in ("Thinking_TPS", "Output_TPS", "Output_Thinking_Ratio"):
+        if column_name not in summary_source.columns:
+            summary_source[column_name] = None
+
     summary_columns = [
         "Run_ID",
         "Status",
@@ -671,6 +803,9 @@ def build_summary_dataframe(df):
         "Finish_Reason",
         "Config_Str",
         "TPS",
+        "Thinking_TPS",
+        "Output_TPS",
+        "Output_Thinking_Ratio",
         "TTFT",
         "First_Event_s",
         "Content_Chunks",
@@ -681,9 +816,18 @@ def build_summary_dataframe(df):
     if "Capability" in df.columns:
         summary_columns.insert(2, "Capability")
 
-    summary_df = df[summary_columns].copy()
+    summary_df = summary_source[summary_columns].copy()
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
     summary_df["TPS"] = summary_df["TPS"].apply(lambda value: format_numeric_value(value, 2))
+    summary_df["Thinking_TPS"] = summary_df["Thinking_TPS"].apply(
+        lambda value: format_numeric_value(value, 2)
+    )
+    summary_df["Output_TPS"] = summary_df["Output_TPS"].apply(
+        lambda value: format_numeric_value(value, 2)
+    )
+    summary_df["Output_Thinking_Ratio"] = summary_df["Output_Thinking_Ratio"].apply(
+        lambda value: format_numeric_value(value, 3)
+    )
     summary_df["TTFT"] = summary_df["TTFT"].apply(lambda value: format_numeric_value(value, 3))
     summary_df["First_Event_s"] = summary_df["First_Event_s"].apply(
         lambda value: format_numeric_value(value, 3)
@@ -707,6 +851,9 @@ def build_summary_dataframe(df):
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
             "TPS": "TPS (chunk/s)",
+            "Thinking_TPS": "Thinking TPS (char/s)",
+            "Output_TPS": "Output TPS (char/s)",
+            "Output_Thinking_Ratio": "Output/Thinking Ratio",
             "TTFT": "TTFT (s)",
             "First_Event_s": "First Event (s)",
             "VRAM_Peak_MiB": "VRAM Peak (MiB)",
@@ -772,6 +919,91 @@ def pause_before_exit():
             input("\n按 Enter 結束...")
     except (EOFError, KeyboardInterrupt):
         pass
+
+
+def get_installed_version(package_name):
+    try:
+        return get_package_version(package_name)
+    except PackageNotFoundError:
+        return None
+
+
+def show_windows_error_dialog(title, message):
+    if sys.platform != "win32":
+        return False
+
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_runtime_ready():
+    if not DEPENDENCY_IMPORT_ERRORS:
+        return
+
+    guidance = {
+        "openai": "請執行 `pip install -U openai`，並確認版本為 1.x 以上。",
+        "questionary": "請執行 `pip install -U questionary prompt_toolkit`。",
+        "matplotlib": "請執行 `pip install -U matplotlib`。",
+        "pandas": "請執行 `pip install -U pandas`。",
+        "requests": "請執行 `pip install -U requests`。",
+    }
+    lines = [
+        "程式啟動前檢查失敗。",
+        "這通常代表另一台電腦雖然有安裝套件，但版本不相容或安裝不完整。",
+        "",
+    ]
+    for package_name, exc in DEPENDENCY_IMPORT_ERRORS.items():
+        installed_version = get_installed_version(package_name)
+        version_label = f"已安裝 {installed_version}" if installed_version else "未偵測到安裝版本"
+        hint = guidance.get(package_name, f"請重新安裝 `{package_name}`。")
+        lines.append(f"- {package_name} ({version_label}): {exc}. {hint}")
+
+    raise RuntimeError("\n".join(lines))
+
+
+def persist_crash_log(error_text):
+    crash_log_path = Path("ollama_expert_bench_V5_crash.log")
+    crash_log_path.write_text(error_text, encoding="utf-8")
+    return crash_log_path
+
+
+def handle_fatal_error(exc):
+    traceback_text = traceback.format_exc()
+    if traceback_text.strip() == "NoneType: None":
+        traceback_text = f"{type(exc).__name__}: {exc}"
+
+    error_text = "\n".join(
+        [
+            "程式執行失敗。",
+            "建議用 PowerShell 或 CMD 執行 `python ollama_expert_bench_V5.py`，比較容易看到完整訊息。",
+            "",
+            f"{type(exc).__name__}: {exc}",
+            "",
+            traceback_text,
+        ]
+    )
+    crash_log_path = persist_crash_log(error_text)
+
+    print(error_text, file=sys.stderr)
+    print(f"\n錯誤記錄已寫入: {crash_log_path.resolve()}", file=sys.stderr)
+
+    if not sys.stdin.isatty():
+        dialog_message = "\n".join(
+            [
+                "程式執行失敗，錯誤記錄已保存。",
+                str(crash_log_path.resolve()),
+                "",
+                f"{type(exc).__name__}: {exc}",
+                "",
+                "請改用 PowerShell / CMD 執行，或把 crash log 傳回來。",
+            ]
+        )
+        show_windows_error_dialog("ollama_expert_bench_V5 啟動失敗", dialog_message)
 
 
 def select_models_and_url(backend):
@@ -1599,7 +1831,13 @@ def save_markdown_report(df, config, report_stem):
     report_path = Path(f"{report_stem}.md")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
+    wrapped_summary_df = wrap_markdown_table_headers(summary_df)
+    wrapped_outcome_summary_df = wrap_markdown_table_headers(outcome_summary_df)
     capability = config.get("capability", "chat")
+    tool_call_success_summary_df = (
+        build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
+    )
+    wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(tool_call_success_summary_df)
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("# Benchmark Report\n\n")
@@ -2123,6 +2361,14 @@ def save_markdown_report(df, config, report_stem):
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
+    wrapped_summary_df = wrap_markdown_table_headers(summary_df)
+    wrapped_outcome_summary_df = wrap_markdown_table_headers(outcome_summary_df)
+    tool_call_success_summary_df = (
+        build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
+    )
+    wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(
+        tool_call_success_summary_df
+    )
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("# Benchmark Report\n\n")
@@ -2431,6 +2677,14 @@ def save_markdown_report(df, config, report_stem):
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
+    wrapped_summary_df = wrap_markdown_table_headers(summary_df)
+    wrapped_outcome_summary_df = wrap_markdown_table_headers(outcome_summary_df)
+    tool_call_success_summary_df = (
+        build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
+    )
+    wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(
+        tool_call_success_summary_df
+    )
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("# Benchmark Report\n\n")
@@ -2464,9 +2718,12 @@ def save_markdown_report(df, config, report_stem):
         file.write("- `non_content_stream`: Stream only carried non-text payloads.\n")
         file.write("- `early_stop`: Stream ended before a complete reply or tool call was received.\n\n")
         file.write("## Summary\n\n")
-        file.write(dataframe_to_text_table(summary_df))
+        file.write(dataframe_to_text_table(wrapped_summary_df))
         file.write("\n\n## Outcome Summary\n\n")
-        file.write(dataframe_to_text_table(outcome_summary_df))
+        file.write(dataframe_to_text_table(wrapped_outcome_summary_df))
+        if capability == "tools" and not tool_call_success_summary_df.empty:
+            file.write("\n\n## Tool Call Success by Model\n\n")
+            file.write(dataframe_to_text_table(wrapped_tool_call_success_summary_df))
         file.write("\n\n## Generated Outputs\n")
 
         for _, row in df.iterrows():
@@ -2824,6 +3081,8 @@ def build_result_row(
 ):
     efficiency_score = calculate_efficiency_score(classification["TPS"], vram_metrics["VRAM_Peak_MiB"])
     retained_sections = build_retained_sections(thinking_text, dialogue_output_text)
+    thinking_chars = classification.get("Thinking_Chars", len(thinking_text))
+    output_chars = classification.get("Output_Chars", len(dialogue_output_text))
     return {
         "Run_ID": run_id,
         "Status": classification["Status"],
@@ -2849,12 +3108,15 @@ def build_result_row(
         "VRAM_Delta_MiB": vram_metrics["VRAM_Delta_MiB"],
         "VRAM_Detail": vram_metrics["VRAM_Detail"],
         "Efficiency_Score": efficiency_score,
+        "Thinking_TPS": classification.get("Thinking_TPS"),
+        "Output_TPS": classification.get("Output_TPS"),
+        "Output_Thinking_Ratio": classification.get("Output_Thinking_Ratio"),
         "Retained_Sections": retained_sections,
-        "Thinking_Chars": len(thinking_text),
+        "Thinking_Chars": thinking_chars,
         "Thinking_Text": thinking_text,
-        "Dialogue_Output_Chars": len(dialogue_output_text),
+        "Dialogue_Output_Chars": output_chars,
         "Dialogue_Output_Text": dialogue_output_text,
-        "Output_Chars": len(dialogue_output_text),
+        "Output_Chars": output_chars,
         "Output_Text": dialogue_output_text,
         "Error": error_message or "",
     }
@@ -2899,6 +3161,7 @@ def run_bench(config):
             start_time = time.time()
             first_event_time = None
             first_content_time = None
+            first_thinking_time = None
             dialogue_output_parts = []
             thinking_parts = []
             chunk_records = []
@@ -2921,6 +3184,8 @@ def run_bench(config):
 
                     if chunk_info["content"] and first_content_time is None:
                         first_content_time = event_time
+                    if chunk_info["thinking"] and first_thinking_time is None:
+                        first_thinking_time = event_time
                     if chunk_info["content"]:
                         dialogue_output_parts.append(chunk_info["content"])
                     if chunk_info["thinking"]:
@@ -2937,6 +3202,7 @@ def run_bench(config):
                     end_time=end_time,
                     first_event_time=first_event_time,
                     first_content_time=first_content_time,
+                    first_thinking_time=first_thinking_time,
                     error_message=None,
                 )
                 classification = adjust_classification_for_capability(classification, capability)
@@ -2967,6 +3233,7 @@ def run_bench(config):
                     end_time=end_time,
                     first_event_time=first_event_time,
                     first_content_time=first_content_time,
+                    first_thinking_time=first_thinking_time,
                     error_message=str(exc),
                 )
                 classification = adjust_classification_for_capability(classification, capability)
@@ -2995,6 +3262,12 @@ def save_markdown_report(df, config, report_stem):
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
+    wrapped_summary_df = wrap_markdown_table_headers(summary_df)
+    wrapped_outcome_summary_df = wrap_markdown_table_headers(outcome_summary_df)
+    tool_call_success_summary_df = (
+        build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
+    )
+    wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(tool_call_success_summary_df)
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("# Benchmark Report\n\n")
@@ -3014,6 +3287,18 @@ def save_markdown_report(df, config, report_stem):
         file.write(f"- VRAM monitoring: {config.get('vram_monitoring', 'unavailable')}\n\n")
         file.write("## Metric Notes\n\n")
         file.write("- `TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks.\n")
+        file.write(
+            "- `Thinking TPS (char/s)`: Estimated throughput of retained thinking text "
+            "from the first thinking payload to stream end.\n"
+        )
+        file.write(
+            "- `Output TPS (char/s)`: Estimated throughput of final dialogue output text "
+            "from the first output text chunk to stream end.\n"
+        )
+        file.write(
+            "- `Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; "
+            "higher means more visible answer text per retained thinking text.\n"
+        )
         file.write("- `TTFT (s)`: Time to first text chunk.\n")
         file.write("- `First Event (s)`: Time to the first streamed event of any kind.\n")
         file.write("- `VRAM Peak (MiB)`: Highest observed total NVIDIA GPU memory usage during a run.\n")
@@ -3032,9 +3317,12 @@ def save_markdown_report(df, config, report_stem):
         file.write("- `non_content_stream`: Stream only carried non-text payloads.\n")
         file.write("- `early_stop`: Stream ended before a complete reply or tool call was received.\n\n")
         file.write("## Summary\n\n")
-        file.write(dataframe_to_text_table(summary_df))
+        file.write(dataframe_to_text_table(wrapped_summary_df))
         file.write("\n\n## Outcome Summary\n\n")
-        file.write(dataframe_to_text_table(outcome_summary_df))
+        file.write(dataframe_to_text_table(wrapped_outcome_summary_df))
+        if capability == "tools" and not tool_call_success_summary_df.empty:
+            file.write("\n\n## Tool Call Success by Model\n\n")
+            file.write(dataframe_to_text_table(wrapped_tool_call_success_summary_df))
         file.write("\n\n## Generated Outputs\n")
 
         for _, row in df.iterrows():
@@ -3062,6 +3350,16 @@ def save_markdown_report(df, config, report_stem):
                 f"{int(row.get('Dialogue_Output_Chars', len(dialogue_output_text)))}\n"
             )
             file.write(f"- TPS: {format_numeric_value(row['TPS'], 2)} chunk/s\n")
+            file.write(
+                f"- Thinking TPS: {format_numeric_value(row.get('Thinking_TPS'), 2)} char/s\n"
+            )
+            file.write(
+                f"- Output TPS: {format_numeric_value(row.get('Output_TPS'), 2)} char/s\n"
+            )
+            file.write(
+                f"- Output/Thinking Ratio: "
+                f"{format_numeric_value(row.get('Output_Thinking_Ratio'), 3)}\n"
+            )
             file.write(f"- TTFT: {format_numeric_value(row['TTFT'], 3)} s\n")
             file.write(f"- First Event: {format_numeric_value(row['First_Event_s'], 3)} s\n")
             file.write(f"- Stream Duration: {format_numeric_value(row['Stream_Duration_s'], 3)} s\n")
@@ -3095,9 +3393,586 @@ def save_markdown_report(df, config, report_stem):
 
     return report_path
 
+import sys
+from dataclasses import dataclass
+
+
+
+
+
+CAPABILITY_DEFAULTS = {
+    "chat": "Explain the long-term creep risk of PETG in 3D printing and how to reduce it.",
+    "tools": (
+        "Check today's weather in Taipei. If you support tools or function calling, "
+        "call the `lookup_weather` tool first instead of answering directly."
+    ),
+}
+
+
+TABLE_COLUMNS = (
+    ("idx", 4),
+    ("param_key", 18),
+    ("state", 8),
+    ("count", 7),
+    ("values", 24),
+    ("range_text", 16),
+)
+
+
+ALLOWED_VALUE_CHARS = set("0123456789,.-+eE")
+
+
+@dataclass
+class ParamGridRow:
+    key: str
+    group: str
+    label: str
+    range_text: str
+    desc: str
+    supported: bool
+    default_value: str
+    enabled: bool = False
+    raw_value: str = ""
+
+
+def ordered_param_keys():
+    ordered_keys = []
+    for param_keys in PARAM_GROUPS.values():
+        for key in param_keys:
+            if key not in ordered_keys:
+                ordered_keys.append(key)
+
+    for key in PARAM_INFO:
+        if key not in ordered_keys:
+            ordered_keys.append(key)
+    return ordered_keys
+
+
+def build_param_rows(backend):
+    group_by_key = {}
+    for group_name, param_keys in PARAM_GROUPS.items():
+        for key in param_keys:
+            group_by_key[key] = group_name
+
+    rows = []
+    for key in ordered_param_keys():
+        info = PARAM_INFO[key]
+        rows.append(
+            ParamGridRow(
+                key=key,
+                group=group_by_key.get(key, "Other"),
+                label=info["label"],
+                range_text=info["range"],
+                desc=info["desc"],
+                supported=backend in info["backends"],
+                default_value=str(info["default"]),
+                raw_value=str(info["default"]),
+            )
+        )
+    return rows
+
+
+def truncate_text(text, width):
+    text = str(text)
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text.ljust(width)
+    if width == 1:
+        return text[:1]
+    return text[: width - 1] + "…"
+
+
+def estimate_combo_count(params):
+    combo_count = 1
+    for values in params.values():
+        combo_count *= len(values)
+    return combo_count
+
+
+def validate_param_rows(rows):
+    final_params = {}
+    for index, row in enumerate(rows):
+        if not row.supported or not row.enabled:
+            continue
+        try:
+            final_params[row.key] = parse_csv_values(row.raw_value)
+        except ValueError as exc:
+            return None, index, f"{row.label}: {exc}"
+    return final_params, None, None
+
+
+def row_value_count(row):
+    if not row.supported:
+        return "LOCK"
+    if not row.enabled:
+        return "-"
+
+    try:
+        return str(len(parse_csv_values(row.raw_value)))
+    except ValueError:
+        return "ERR"
+
+
+def build_grid_fragments(rows, selected_row_index, selected_column_index, message, message_style):
+    from prompt_toolkit.formatted_text import to_formatted_text
+
+    selected_row = rows[selected_row_index]
+    preview_params, _, preview_error = validate_param_rows(rows)
+    combo_count = "ERR" if preview_error else str(estimate_combo_count(preview_params or {}))
+    selected_count = sum(1 for row in rows if row.supported and row.enabled)
+    active_column_name = "state" if selected_column_index == 0 else "values"
+
+    fragments = []
+    fragments.extend(
+        to_formatted_text(
+            [
+                ("class:title", "LLM Benchmark V5 | Full-Page Parameter Grid\n"),
+                (
+                    "class:subtitle",
+                    "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
+                    "Type numbers in Values | Backspace deletes | d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
+                ),
+            ]
+        )
+    )
+
+    header_cells = {
+        "idx": "#",
+        "param_key": "Param Key",
+        "state": "State",
+        "count": "Count",
+        "values": "Values",
+        "range_text": "Range",
+    }
+    for column_name, width in TABLE_COLUMNS:
+        fragments.append(("class:table.header", truncate_text(header_cells[column_name], width)))
+        fragments.append(("class:table.header", " "))
+    fragments.append(("", "\n"))
+    fragments.append(("class:table.rule", "-" * (sum(width for _, width in TABLE_COLUMNS) + len(TABLE_COLUMNS))))
+    fragments.append(("", "\n"))
+
+    for row_index, row in enumerate(rows):
+        row_style = "class:table.row"
+        if row_index == selected_row_index:
+            row_style = "class:table.row.selected"
+
+        state_text = "LOCK" if not row.supported else "TEST" if row.enabled else "N/A"
+        value_text = "backend n/a" if not row.supported else row.raw_value if row.enabled else "N/A"
+        cell_values = {
+            "idx": f"{row_index + 1:02d}",
+            "param_key": row.key,
+            "state": state_text,
+            "count": row_value_count(row),
+            "values": value_text,
+            "range_text": row.range_text,
+        }
+
+        for column_name, width in TABLE_COLUMNS:
+            cell_style = row_style
+            if row_index == selected_row_index and column_name == active_column_name:
+                cell_style = "class:table.cell.current"
+            fragments.append((cell_style, truncate_text(cell_values[column_name], width)))
+            fragments.append((row_style, " "))
+        fragments.append(("", "\n"))
+
+    support_text = ", ".join(PARAM_INFO[selected_row.key]["backends"])
+    status_style = "class:status.ok" if not preview_error else "class:status.error"
+    fragments.extend(
+        to_formatted_text(
+            [
+                ("", "\n"),
+                ("class:panel.title", "Selected Parameter\n"),
+                ("class:panel.label", f"Key: {selected_row.key}\n"),
+                ("class:panel.label", f"Label: {selected_row.label}\n"),
+                ("class:panel.label", f"Groups: {selected_row.group}\n"),
+                ("class:panel.label", f"Supports: {support_text}\n"),
+                ("class:panel.label", f"Default values: {selected_row.default_value}\n"),
+                ("class:panel.label", f"Description: {selected_row.desc}\n\n"),
+                ("class:panel.title", "Config Preview\n"),
+                ("class:panel.label", f"Selected params: {selected_count}\n"),
+                ("class:panel.label", f"Combination count: {combo_count}\n"),
+                (status_style, f"Validation: {'OK' if not preview_error else preview_error}\n"),
+            ]
+        )
+    )
+
+    if message:
+        fragments.append((message_style, f"\n{message}\n"))
+
+    return fragments
+
+
+def edit_param_grid(backend):
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
+
+    rows = build_param_rows(backend)
+    state = {
+        "row_index": 0,
+        "column_index": 0,
+        "message": "",
+        "message_style": "class:hint",
+    }
+
+    def set_message(text, style="class:hint"):
+        state["message"] = text
+        state["message_style"] = style
+
+    def current_row():
+        return rows[state["row_index"]]
+
+    def move_row(delta):
+        state["row_index"] = max(0, min(len(rows) - 1, state["row_index"] + delta))
+
+    def move_column(delta):
+        state["column_index"] = (state["column_index"] + delta) % 2
+
+    def toggle_current_row():
+        row = current_row()
+        if not row.supported:
+            set_message(f"{row.key} is not supported on {backend}.", "class:status.warning")
+            return
+
+        row.enabled = not row.enabled
+        if row.enabled and not row.raw_value.strip():
+            row.raw_value = row.default_value
+        set_message(f"{row.key} -> {'TEST' if row.enabled else 'N/A'}", "class:hint")
+
+    def restore_default():
+        row = current_row()
+        if not row.supported:
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            return
+
+        row.enabled = True
+        row.raw_value = row.default_value
+        set_message(f"{row.key} restored to default values.", "class:hint")
+
+    def append_value(char):
+        row = current_row()
+        if not row.supported:
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            return
+
+        if char not in ALLOWED_VALUE_CHARS:
+            set_message(f"Unsupported character: {char!r}", "class:status.warning")
+            return
+
+        if not row.enabled:
+            row.enabled = True
+            if row.raw_value == "N/A":
+                row.raw_value = ""
+        row.raw_value += char
+        set_message(f"Editing {row.key}", "class:hint")
+
+    def backspace_value():
+        row = current_row()
+        if not row.supported:
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            return
+
+        if not row.enabled:
+            row.enabled = True
+            row.raw_value = row.default_value
+            set_message(f"{row.key} enabled with default values.", "class:hint")
+            return
+
+        row.raw_value = row.raw_value[:-1]
+        set_message(f"Editing {row.key}", "class:hint")
+
+    def accept(event):
+        params, error_row_index, error_message = validate_param_rows(rows)
+        if error_message:
+            state["row_index"] = error_row_index
+            state["column_index"] = 1
+            set_message(error_message, "class:status.error")
+            return
+        event.app.exit(result=params or {})
+
+    table_control = FormattedTextControl(
+        lambda: build_grid_fragments(
+            rows=rows,
+            selected_row_index=state["row_index"],
+            selected_column_index=state["column_index"],
+            message=state["message"],
+            message_style=state["message_style"],
+        ),
+        focusable=True,
+        show_cursor=False,
+    )
+
+    root_container = HSplit([Window(content=table_control, always_hide_cursor=True)])
+    style = Style.from_dict(
+        {
+            "title": "bold ansicyan",
+            "subtitle": "ansibrightblack",
+            "table.header": "bold ansiyellow",
+            "table.rule": "ansibrightblack",
+            "table.row": "",
+            "table.row.selected": "bg:ansiblue ansiwhite",
+            "table.cell.current": "reverse",
+            "panel.title": "bold ansigreen",
+            "panel.label": "",
+            "status.ok": "ansigreen",
+            "status.warning": "ansiyellow",
+            "status.error": "ansired",
+            "hint": "ansicyan",
+        }
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def _(event):
+        move_row(-1)
+
+    @kb.add("down")
+    def _(event):
+        move_row(1)
+
+    @kb.add("left")
+    def _(event):
+        move_column(-1)
+
+    @kb.add("right")
+    def _(event):
+        move_column(1)
+
+    @kb.add("tab")
+    def _(event):
+        move_column(1)
+
+    @kb.add("s-tab")
+    def _(event):
+        move_column(-1)
+
+    @kb.add("space")
+    def _(event):
+        if state["column_index"] == 0:
+            toggle_current_row()
+
+    @kb.add("backspace")
+    @kb.add("c-h")
+    def _(event):
+        if state["column_index"] == 1:
+            backspace_value()
+
+    @kb.add("delete")
+    def _(event):
+        if state["column_index"] == 1:
+            current_row().raw_value = ""
+            current_row().enabled = True
+            set_message(f"Cleared {current_row().key}.", "class:hint")
+
+    @kb.add("d")
+    def _(event):
+        restore_default()
+
+    @kb.add("enter")
+    @kb.add("c-s")
+    def _(event):
+        accept(event)
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event):
+        event.app.exit(result=None)
+
+    @kb.add(Keys.Any)
+    def _(event):
+        if state["column_index"] != 1:
+            return
+
+        char = event.data
+        if not char or char not in ALLOWED_VALUE_CHARS:
+            return
+        append_value(char)
+
+    application = Application(
+        layout=Layout(root_container),
+        key_bindings=kb,
+        full_screen=True,
+        mouse_support=False,
+        style=style,
+    )
+    return application.run()
+
+
+def print_config_review(config):
+    params = config["params"]
+    combo_count = estimate_combo_count(params) if params else 1
+
+    print("\n" + "=" * 62)
+    print("V5 Config Review")
+    print("=" * 62)
+    print(f"- Backend: {config['backend']}")
+    print(f"- Capability: {config['capability']}")
+    print(f"- Base URL: {config['url']}")
+    print(f"- Models: {', '.join(config['models'])}")
+    print(f"- Param count: {len(params)}")
+    print(f"- Combination count: {combo_count}")
+    if params:
+        print("- Parameter values:")
+        for key, values in params.items():
+            print(f"  - {key}: {values}")
+    else:
+        print("- Parameter values: use backend defaults only")
+
+
+def build_console_summary_dataframe(results_df):
+    summary_df = build_summary_dataframe(results_df)
+    console_columns = ["Run", "Status"]
+    if "Capability" in summary_df.columns:
+        console_columns.append("Capability")
+    console_columns.extend(
+        [
+            "Output Category",
+            "Finish Reason",
+            "Model",
+            "TPS (chunk/s)",
+            "Thinking TPS (char/s)",
+            "Output TPS (char/s)",
+            "Output/Thinking Ratio",
+            "TTFT (s)",
+            "First Event (s)",
+            "Chunks (content/total)",
+            "Config",
+        ]
+    )
+    return summary_df[console_columns]
+
+
+def interactive_config():
+    print("\n" + "=" * 62)
+    print("LLM Benchmark V5")
+    print("=" * 62)
+
+    backend = questionary.select(
+        "Select backend:",
+        choices=[
+            Choice("Ollama", value="ollama"),
+            Choice("llama.cpp (llama-server)", value="llama.cpp"),
+        ],
+    ).ask()
+    if not backend:
+        return None
+
+    capability = questionary.select(
+        "Select benchmark mode:",
+        choices=[
+            Choice("Chat | Standard chat response benchmark", value="chat"),
+            Choice("Tools | Check whether the model emits tool_calls", value="tools"),
+        ],
+    ).ask()
+    if not capability:
+        return None
+
+    url, models = select_models_and_url(backend)
+    if not models:
+        print("No models available. Cancelled.")
+        return None
+
+    final_params = edit_param_grid(backend)
+    if final_params is None:
+        print("Parameter grid cancelled.")
+        return None
+
+    prompt = questionary.text(
+        "Benchmark prompt:",
+        default=CAPABILITY_DEFAULTS[capability],
+    ).ask()
+    if prompt is None:
+        return None
+
+    config = {
+        "backend": backend,
+        "capability": capability,
+        "url": url,
+        "models": models,
+        "params": final_params,
+        "prompt": prompt,
+    }
+
+    print_config_review(config)
+    confirmed = questionary.confirm(
+        "Start benchmark with this configuration?",
+        default=True,
+    ).ask()
+    if not confirmed:
+        print("Cancelled before benchmark run.")
+        return None
+
+    return config
+
+
+def main():
+    config = interactive_config()
+    if not config:
+        return
+
+    results_df = run_bench(config)
+    if results_df.empty:
+        print("No benchmark rows were produced.")
+        return
+
+    ok_count = int((results_df["Status"] == "ok").sum())
+    warning_count = int((results_df["Status"] == "warning").sum())
+    error_count = int((results_df["Status"] == "error").sum())
+    capability = config.get("capability", "chat")
+    report_stem = f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    raw_outputs_path = save_raw_outputs(results_df, report_stem)
+
+    print("\n" + "=" * 62)
+    console_df = build_console_summary_dataframe(results_df)
+    print(dataframe_to_text_table(console_df))
+    print(f"\nResult counts: ok={ok_count}, warning={warning_count}, error={error_count}")
+
+    report_path = None
+    chart_path = None
+
+    try:
+        report_path = save_markdown_report(results_df, config, report_stem)
+    except Exception as exc:
+        print(f"Report generation failed: {exc}")
+
+    try:
+        chart_path = plot_results(results_df, f"{report_stem}.png", capability=capability)
+    except Exception as exc:
+        print(f"Chart generation failed: {exc}")
+
+    try:
+        export_best_config(results_df, config)
+    except Exception as exc:
+        print(f"best_config export failed: {exc}")
+
+    if report_path:
+        print(f"\nSaved report: {report_path}")
+    else:
+        print("\nMarkdown report was not saved.")
+
+    print(f"Saved raw outputs: {raw_outputs_path}")
+    if chart_path:
+        print(f"Saved chart: {chart_path}")
+    else:
+        print("Skipped chart output because there were no eligible successful results.")
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
+        ensure_runtime_ready()
         main()
+    except KeyboardInterrupt:
+        print("\n已取消執行。")
+    except Exception as exc:
+        exit_code = 1
+        handle_fatal_error(exc)
     finally:
         pause_before_exit()
+    if exit_code:
+        sys.exit(exit_code)

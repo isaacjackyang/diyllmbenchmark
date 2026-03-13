@@ -33,7 +33,19 @@
 安裝 Python 套件：
 
 ```bash
-pip install openai pandas matplotlib questionary requests tabulate
+python -m pip install -r requirements.txt
+```
+
+Windows 也可以直接執行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後執行上面的安裝指令，再執行：
+
+```bash
+python ollama_expert_bench_V3.py
 ```
 
 ## 快速開始
@@ -61,6 +73,42 @@ pip install openai pandas matplotlib questionary requests tabulate
 3. 依照互動式選單完成設定。
 
 這個工具目前是互動式操作，沒有命令列參數介面；所有設定都是在執行後逐步選擇。
+
+## V4 參數頁試作
+
+如果你想試新版的整頁表格式參數設定頁，可以執行：
+
+```bash
+python ollama_expert_bench_V4.py
+```
+
+V4 目前保留 V3 的 benchmark 核心，但把參數設定頁改成全螢幕 grid：
+
+- `↑ / ↓`：移動參數列
+- `← / →` 或 `Tab`：切換 `State / Values` 欄位
+- `Space`：切換 `N/A` 與 `TEST`
+- 在 `Values` 欄位直接輸入數字、逗號、小數點、負號
+- `Backspace`：刪除一個字元
+- `d`：恢復該參數預設值
+- `Enter` / `Ctrl+S`：確認設定並進入 review
+- `Esc`：取消
+
+這一頁會一次列出所有可調參數；若目前 backend 不支援，該列會顯示 `LOCK`。
+V4 的終端摘要與 `report.md` 也會一起顯示 `Thinking TPS`、`Output TPS` 和 `Output/Thinking Ratio`。
+
+## V5 單檔完整版
+
+如果你要一支單檔就能直接跑的完整版本，可以執行：
+
+```bash
+python ollama_expert_bench_V5.py
+```
+
+V5 目前整合了：
+
+- V4 的全頁表格式參數設定 UI
+- V3 最後版本的 benchmark / 圖表 / Markdown report / JSONL raw outputs / best config 輸出
+- `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
 
 ## 使用流程
 
@@ -188,6 +236,12 @@ Benchmark 完成後，會在專案目錄下看到以下檔案：
 
 - `TPS (chunk/s)`
   - 以有文字內容的串流 chunk 估算吞吐量，適合做相對比較
+- `Thinking TPS (char/s)`
+  - 以保留下來的 thinking 文字字數估算吞吐量
+- `Output TPS (char/s)`
+  - 以最終 dialogue output 字數估算吞吐量
+- `Output/Thinking Ratio`
+  - `output chars / thinking chars`，方便快速比較最終輸出相對於 thinking 的比例
 - `TTFT (s)`
   - 從送出 request 到收到第一段文字的時間
 - `First Event (s)`
