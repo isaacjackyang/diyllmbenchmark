@@ -42,6 +42,13 @@ Windows 也可以直接執行：
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+這個腳本會自動：
+
+- 找出可用的 `py` 或 `python`
+- 升級 `pip`
+- 依照 `requirements.txt` 安裝依賴
+- 驗證 `ollama_expert_bench.py` 需要的關鍵套件是否真的能 import
+
 如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後執行上面的安裝指令，再執行：
 
 ```bash
@@ -85,9 +92,11 @@ python ollama_expert_bench.py
 這個單檔版本目前整合了：
 
 - 原 V4 的全頁表格式參數設定 UI
-- 原 V3 / V5 的 benchmark / 圖表 / Markdown report / JSONL raw outputs / best config 輸出
+- 原 V3 / V5 的 benchmark / 圖表 / HTML report / JSONL raw outputs / best config 輸出
 - `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
 - `tools` 模式下各模型的 tool call 成功次數與成功率摘要
+- 可把 `system prompt` 當成獨立測試維度，支援 `N/A`、固定數量或自訂數量，並用整頁編輯區直接貼上多段 prompt
+- 產出的 HTML 報告會用中英對照顯示主要段落、欄位與指標說明
 
 互動式整頁 grid 的操作方式如下：
 
@@ -101,6 +110,13 @@ python ollama_expert_bench.py
 - `Esc`：取消
 
 這一頁會一次列出所有可調參數；若目前 backend 不支援，該列會顯示 `LOCK`。
+
+在設定流程中，如果中途改變心意，也可以返回上一階段：
+
+- `select / checkbox / confirm` 畫面：按 `Backspace`
+- 一般 `text` 輸入框：當輸入框是空的時按 `Backspace`
+- 參數 grid：在 `State` 欄按 `Backspace` 返回上一階段；在 `Values` 欄仍是刪字
+- `system prompt` 編輯器：當編輯器是空的時按 `Backspace`
 
 ## 使用流程
 
@@ -121,12 +137,16 @@ python ollama_expert_bench.py
 5. 各參數的測試值
    - 以逗號分隔，例如 `0.1, 0.8`
 6. 測試 prompt
+7. `system prompt` 變體
+   - 可選 `N/A`
+   - 可選 `1 / 2 / 3` 種，或手動輸入自訂數量
+   - 會開啟多行貼上編輯區，使用單獨一行的 `---` 分隔不同 system prompt
 
 程式會把你輸入的所有參數值做笛卡兒積組合，所以總測試次數為：
 
-`模型數量 x 參數組合數`
+`模型數量 x 參數組合數 x system prompt 變體數`
 
-如果沒有選任何參數，就只會以各模型目前預設設定各跑一次。
+如果沒有選任何參數，且 `system prompt` 也選 `N/A`，就只會以各模型目前預設設定各跑一次。
 
 ## Benchmark 模式說明
 
@@ -202,6 +222,9 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
 
 - `Report/bench_{backend}_{capability}_{timestamp}.html`
   - 完整 HTML 報告
+  - `Summary / 摘要` 區塊內含 Excel 下載按鈕
+- `Report/bench_{backend}_{capability}_{timestamp}_summary.xlsx`
+  - `Summary`、`Outcome Summary` 與 `tools` 模式下的工具成功率摘要 Excel
 - `Report/bench_{backend}_{capability}_{timestamp}.png`
   - 圖表輸出
   - 若沒有可繪圖的成功結果，可能不會產生

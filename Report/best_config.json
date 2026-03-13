@@ -1,16 +1,16 @@
 {
-    "generated_at": "2026-03-13 14:53:22",
+    "generated_at": "2026-03-13 16:04:55",
     "backend": "ollama",
     "capability": "tools",
     "selection_metric": "first_event_s",
     "model": "qwen3.5:4b",
     "params": {
-        "temperature": 0.1,
-        "repeat_penalty": 2
+        "temperature": 0.8,
+        "repeat_penalty": 1.05
     },
     "applied_params": {
-        "temperature": 0.1,
-        "repeat_penalty": 2
+        "temperature": 0.8,
+        "repeat_penalty": 1.05
     },
     "status": "ok",
     "output_category": "tool_call",
@@ -18,12 +18,13 @@
     "diagnosis": "Received tool_calls payload during the tool benchmark (finish_reason=tool_calls).",
     "tps": null,
     "ttft": null,
-    "first_event_s": 2.601,
-    "stream_duration_s": 4.645,
+    "first_event_s": 2.545,
+    "stream_duration_s": 4.487,
     "vram_base_mib": 8431,
     "vram_peak_mib": 8431,
     "vram_delta_mib": 0,
     "vram_detail": "GPU 0 NVIDIA GeForce RTX 3080 Laptop GPU: 8431 -> 8431 / 16384 MiB (+0 MiB)",
     "efficiency_score_tps_per_gib_peak": null,
-    "prompt": "Check today's weather in Taipei. If you support tools or function calling, call the `lookup_weather` tool first instead of answering directly."
+    "prompt": "Check today's weather in Taipei. If you support tools or function calling, call the `lookup_weather` tool first instead of answering directly.",
+    "system_prompts": []
 }

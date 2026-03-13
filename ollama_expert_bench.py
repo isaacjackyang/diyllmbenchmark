@@ -1,5 +1,6 @@
 import html
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -237,26 +238,40 @@ def build_backend_options(backend, params):
     return backend_options
 
 
-def build_benchmark_messages(capability, prompt):
+SYSTEM_PROMPT_BLOCK_SEPARATOR = "---"
+BACK_ACTION = "__back__"
+
+
+def build_system_prompt_variants(system_prompts):
+    prompts = [prompt.strip() for prompt in (system_prompts or []) if (prompt or "").strip()]
+    if not prompts:
+        return [{"label": "N/A", "text": ""}]
+    return [{"label": f"SP{index}", "text": prompt} for index, prompt in enumerate(prompts, start=1)]
+
+
+def build_benchmark_messages(capability, prompt, system_prompt_text=""):
+    messages = []
+    if (system_prompt_text or "").strip():
+        messages.append({"role": "system", "content": system_prompt_text.strip()})
     if capability == "tools":
-        return [
+        messages.append(
             {
                 "role": "system",
                 "content": (
                     "You are being benchmarked for tool calling. "
                     "If a suitable tool is provided, call the tool before answering."
                 ),
-            },
-            {"role": "user", "content": prompt},
-        ]
-    return [{"role": "user", "content": prompt}]
+            }
+        )
+    messages.append({"role": "user", "content": prompt})
+    return messages
 
 
-def build_chat_request_payload(config, model, request_kwargs):
+def build_chat_request_payload(config, model, request_kwargs, system_prompt_text=""):
     capability = config.get("capability", "chat")
     payload = {
         "model": model,
-        "messages": build_benchmark_messages(capability, config["prompt"]),
+        "messages": build_benchmark_messages(capability, config["prompt"], system_prompt_text),
         "stream": True,
         **request_kwargs,
     }
@@ -691,6 +706,7 @@ def build_tool_call_success_summary_dataframe(df):
 
 def wrap_markdown_table_headers(df):
     header_map = {
+        "System Prompt": "System Prompt<br>Variant",
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
         "Total Output (chars)": "Total Output<br>(chars)",
@@ -839,6 +855,8 @@ def build_summary_dataframe(df):
     ]
     if "Capability" in df.columns:
         summary_columns.insert(2, "Capability")
+    if "System_Prompt_Label" in df.columns:
+        summary_columns.insert(summary_columns.index("Model") + 1, "System_Prompt_Label")
 
     summary_df = summary_source[summary_columns].copy()
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
@@ -878,6 +896,7 @@ def build_summary_dataframe(df):
             "Run_ID": "Run",
             "Capability": "Capability",
             "Output_Category": "Output Category",
+            "System_Prompt_Label": "System Prompt",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
             "Output_Chars": "Total Output (chars)",
@@ -954,6 +973,72 @@ def dataframe_to_html_table(df, table_class="report-table", empty_message="No da
     return "".join(parts)
 
 
+def make_excel_friendly_dataframe(df):
+    excel_df = df.copy()
+    excel_df.columns = [re.sub(r"<br\s*/?>", "\n", str(column)) for column in excel_df.columns]
+    return excel_df
+
+
+def style_excel_worksheet(worksheet):
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    worksheet.freeze_panes = "A2"
+    header_fill = PatternFill(fill_type="solid", fgColor="F6EFE2")
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        cell.fill = header_fill
+
+    for column_cells in worksheet.columns:
+        lengths = []
+        for cell in column_cells:
+            value = "" if cell.value is None else str(cell.value)
+            lines = value.splitlines() or [value]
+            lengths.append(max(len(line) for line in lines))
+            if cell.row > 1:
+                cell.alignment = Alignment(vertical="top")
+        column_width = min(max(lengths) + 2 if lengths else 12, 42)
+        worksheet.column_dimensions[get_column_letter(column_cells[0].column)].width = max(column_width, 12)
+
+
+def save_summary_excel_workbook(df, config, report_stem):
+    capability = config.get("capability", "chat")
+    workbook_path = Path(f"{report_stem}_summary.xlsx")
+    summary_df = make_excel_friendly_dataframe(localize_report_dataframe(build_summary_dataframe(df)))
+    outcome_summary_df = make_excel_friendly_dataframe(
+        localize_report_dataframe(build_outcome_summary_dataframe(df))
+    )
+    tool_call_success_summary_df = (
+        make_excel_friendly_dataframe(
+            localize_report_dataframe(build_tool_call_success_summary_dataframe(df))
+        )
+        if capability == "tools"
+        else pd.DataFrame()
+    )
+
+    with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:
+        summary_df.to_excel(writer, sheet_name="Summary", index=False)
+        outcome_summary_df.to_excel(writer, sheet_name="Outcome Summary", index=False)
+        if capability == "tools" and not tool_call_success_summary_df.empty:
+            tool_call_success_summary_df.to_excel(writer, sheet_name="Tool Call Success", index=False)
+
+        for worksheet in writer.book.worksheets:
+            style_excel_worksheet(worksheet)
+
+    return workbook_path
+
+
+def build_download_button(href, label):
+    if not href:
+        return ""
+    return (
+        f'<a class="download-button" href="{html_escape_text(href)}" download>'
+        f"{html_escape_text(label)}</a>"
+    )
+
+
 def key_value_rows_to_html_table(rows, table_class="kv-table"):
     frame = pd.DataFrame(rows, columns=["Field", "Value"])
     return dataframe_to_html_table(frame, table_class=table_class)
@@ -965,6 +1050,108 @@ def bullet_list_to_html(items, list_class="note-list"):
         parts.append(f"<li>{html_escape_text(item)}</li>")
     parts.append("</ul>")
     return "".join(parts)
+
+
+def bilingual_text(english, chinese):
+    return f"{english} / {chinese}"
+
+
+STATUS_BILINGUAL_MAP = {
+    "ok": bilingual_text("ok", "正常"),
+    "warning": bilingual_text("warning", "警告"),
+    "error": bilingual_text("error", "錯誤"),
+}
+
+CAPABILITY_BILINGUAL_MAP = {
+    "chat": bilingual_text("chat", "對話"),
+    "tools": bilingual_text("tools", "工具呼叫"),
+}
+
+OUTPUT_CATEGORY_BILINGUAL_MAP = {
+    "normal_content": bilingual_text("normal_content", "正常文字輸出"),
+    "tool_call": bilingual_text("tool_call", "工具呼叫"),
+    "text_reply_without_tool": bilingual_text("text_reply_without_tool", "有文字回覆但未呼叫工具"),
+    "empty_reply": bilingual_text("empty_reply", "空回覆"),
+    "non_content_stream": bilingual_text("non_content_stream", "僅非文字串流"),
+    "early_stop": bilingual_text("early_stop", "提早中斷"),
+}
+
+FINISH_REASON_BILINGUAL_MAP = {
+    "stop": bilingual_text("stop", "正常結束"),
+    "tool_calls": bilingual_text("tool_calls", "工具呼叫結束"),
+    "length": bilingual_text("length", "長度上限"),
+}
+
+REPORT_HEADER_BILINGUAL_MAP = {
+    "Run": "Run<br>執行編號",
+    "Status": "Status<br>狀態",
+    "Capability": "Capability<br>能力模式",
+    "Output Category": "Output Category<br>輸出分類",
+    "Model": "Model<br>模型",
+    "System Prompt": "System Prompt<br>系統提示",
+    "Finish Reason": "Finish Reason<br>結束原因",
+    "Config": "Config<br>測試設定",
+    "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
+    "Total Output Time (s)": "Total Output Time<br>(s)<br>總輸出時間",
+    "TPS (chunk/s)": "TPS<br>(chunk/s)<br>輸出速率",
+    "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)<br>思考速率",
+    "Output TPS (char/s)": "Output TPS<br>(char/s)<br>回覆速率",
+    "Output/Thinking Ratio": "Output/Thinking<br>Ratio<br>輸出思考比",
+    "TTFT (s)": "TTFT<br>(s)<br>首字延遲",
+    "First Event (s)": "First Event<br>(s)<br>首事件延遲",
+    "VRAM Peak (MiB)": "VRAM Peak<br>(MiB)<br>顯存峰值",
+    "Efficiency Score (TPS/GiB Peak)": "Efficiency Score<br>(TPS/GiB Peak)<br>效率分數",
+    "Chunks (content/total)": "Chunks<br>(content/total)<br>片段數",
+    "Count": "Count<br>次數",
+    "Total Runs": "Total Runs<br>總測試次數",
+    "Tool Call Success Count": "Tool Call Success<br>Count<br>工具成功次數",
+    "Tool Call Success Probability": "Tool Call Success<br>Probability<br>工具成功率",
+}
+
+
+def localize_status_value(value):
+    return STATUS_BILINGUAL_MAP.get(value, value)
+
+
+def localize_capability_value(value):
+    return CAPABILITY_BILINGUAL_MAP.get(value, value)
+
+
+def localize_output_category_value(value):
+    return OUTPUT_CATEGORY_BILINGUAL_MAP.get(value, value)
+
+
+def localize_finish_reason_value(value):
+    if value in (None, "", "N/A"):
+        return bilingual_text("N/A", "無")
+    return FINISH_REASON_BILINGUAL_MAP.get(value, value)
+
+
+def localize_system_prompt_label(value):
+    if value in (None, "", "N/A"):
+        return bilingual_text("N/A", "未使用額外 system prompt")
+    return bilingual_text(str(value), "系統提示變體")
+
+
+def localize_report_dataframe(df):
+    localized_df = df.copy()
+    if "Status" in localized_df.columns:
+        localized_df["Status"] = localized_df["Status"].apply(localize_status_value)
+    if "Capability" in localized_df.columns:
+        localized_df["Capability"] = localized_df["Capability"].apply(localize_capability_value)
+    if "Output Category" in localized_df.columns:
+        localized_df["Output Category"] = localized_df["Output Category"].apply(
+            localize_output_category_value
+        )
+    if "Finish Reason" in localized_df.columns:
+        localized_df["Finish Reason"] = localized_df["Finish Reason"].apply(
+            localize_finish_reason_value
+        )
+    if "System Prompt" in localized_df.columns:
+        localized_df["System Prompt"] = localized_df["System Prompt"].apply(
+            localize_system_prompt_label
+        )
+    return localized_df.rename(columns=REPORT_HEADER_BILINGUAL_MAP)
 
 
 def serialize_result_value(value):
@@ -1115,35 +1302,69 @@ def handle_fatal_error(exc):
         show_windows_error_dialog("ollama_expert_bench 啟動失敗", dialog_message)
 
 
-def select_models_and_url(backend):
+def select_models_and_url(backend, previous_url=None, previous_models=None):
+    previous_models = previous_models or []
+
     if backend == "ollama":
         detected_models = get_ollama_models()
-        models = []
         if detected_models:
-            models = questionary.checkbox(
-                "選擇測試模型:",
-                choices=detected_models,
-            ).ask() or []
+            choice_list = [
+                Choice(model_name, value=model_name, checked=model_name in previous_models)
+                for model_name in detected_models
+            ]
+            selected_models = ask_checkbox_with_back(
+                "Select benchmark models / 選擇測試模型:",
+                choices=choice_list,
+            )
+            if selected_models is None:
+                return None
+            if selected_models == BACK_ACTION:
+                return BACK_ACTION
+            if selected_models:
+                return "http://localhost:11434/v1", selected_models
 
-        if not models:
-            manual_input = questionary.text(
-                "請輸入 Ollama 模型名稱 (逗號隔開):",
-                default="qwen3.5:latest",
-            ).ask()
+        while True:
+            manual_input = ask_text_with_back(
+                "Enter Ollama model names (comma separated) / 請輸入 Ollama 模型名稱（逗號分隔）:",
+                default=",".join(previous_models) if previous_models else "qwen3.5:latest",
+            )
+            if manual_input is None:
+                return None
+            if manual_input == BACK_ACTION:
+                return BACK_ACTION
             models = [name.strip() for name in (manual_input or "").split(",") if name.strip()]
+            if models:
+                return "http://localhost:11434/v1", models
+            print("At least one model is required. / 至少需要一個模型名稱。")
 
-        return "http://localhost:11434/v1", models
+    port_default = "8080"
+    if previous_url and previous_url.startswith("http://localhost:") and previous_url.endswith("/v1"):
+        port_default = previous_url.removeprefix("http://localhost:").removesuffix("/v1") or "8080"
 
-    port = questionary.text(
-        "請輸入 llama-server 端口:",
-        default="8080",
-    ).ask()
-    model_names = questionary.text(
-        "請輸入載入中的模型名稱 (逗號隔開，僅作識別用):",
-        default="llama.cpp-model",
-    ).ask()
-    models = [name.strip() for name in (model_names or "").split(",") if name.strip()]
-    return f"http://localhost:{port or '8080'}/v1", models
+    while True:
+        port = ask_text_with_back(
+            "Enter llama-server port / 請輸入 llama-server 端口:",
+            default=port_default,
+        )
+        if port is None:
+            return None
+        if port == BACK_ACTION:
+            return BACK_ACTION
+
+        model_names = ask_text_with_back(
+            "Enter loaded model names (comma separated, for labeling only) / "
+            "請輸入載入中的模型名稱（逗號分隔，僅供辨識）:",
+            default=",".join(previous_models) if previous_models else "llama.cpp-model",
+        )
+        if model_names is None:
+            return None
+        if model_names == BACK_ACTION:
+            continue
+
+        models = [name.strip() for name in (model_names or "").split(",") if name.strip()]
+        if models:
+            return f"http://localhost:{port or '8080'}/v1", models
+        print("At least one model is required. / 至少需要一個模型名稱。")
 
 
 def interactive_config():
@@ -1346,9 +1567,17 @@ def plot_results(df, output_path, capability="chat"):
 
     plot_df, used_fallback = select_plot_dataframe(df, capability=capability)
     plot_df = plot_df.copy()
+    multi_prompt_mode = (
+        "System_Prompt_Label" in plot_df.columns
+        and plot_df["System_Prompt_Label"].fillna("N/A").nunique(dropna=False) > 1
+    )
 
     def build_label(row):
-        label = f"{row['Model']} | {row['Config_Str']}"
+        system_prompt_label = row.get("System_Prompt_Label", "N/A")
+        if multi_prompt_mode or (system_prompt_label not in ("", "N/A", None)):
+            label = f"{row['Model']} | {system_prompt_label} | {row['Config_Str']}"
+        else:
+            label = f"{row['Model']} | {row['Config_Str']}"
         return label if len(label) <= 42 else label[:39] + "..."
 
     def build_run_color(row):
@@ -2054,6 +2283,8 @@ def export_best_config(df, config):
         "capability": capability,
         "selection_metric": selection_metric,
         "model": best_row["Model"],
+        "system_prompt_label": best_row.get("System_Prompt_Label", "N/A"),
+        "system_prompt_text": best_row.get("System_Prompt_Text", ""),
         "params": best_row["Params"],
         "applied_params": best_row["Applied_Params"],
         "status": best_row["Status"],
@@ -2601,6 +2832,7 @@ def export_best_config(df, config, output_dir="."):
         "vram_detail": best_row["VRAM_Detail"],
         "efficiency_score_tps_per_gib_peak": best_row["Efficiency_Score"],
         "prompt": config["prompt"],
+        "system_prompts": config.get("system_prompts", []),
     }
     serializable_payload = {
         key: serialize_result_value(value) for key, value in payload.items()
@@ -2928,9 +3160,20 @@ def main():
 
     report_path = None
     chart_path = None
+    summary_excel_path = None
 
     try:
-        report_path = save_markdown_report(results_df, config, report_stem)
+        summary_excel_path = save_summary_excel_workbook(results_df, config, report_stem)
+    except Exception as exc:
+        print(f"Summary Excel export failed: {exc}")
+
+    try:
+        report_path = save_markdown_report(
+            results_df,
+            config,
+            report_stem,
+            summary_excel_path=summary_excel_path,
+        )
     except Exception as exc:
         print(f"Report generation failed: {exc}")
 
@@ -2950,6 +3193,8 @@ def main():
         print(f"\nSaved report: {report_path}")
     else:
         print("\nMarkdown report was not saved.")
+    if summary_excel_path:
+        print(f"Saved summary Excel: {summary_excel_path}")
 
     print(f"Saved raw outputs: {raw_outputs_path}")
     if chart_path:
@@ -3206,6 +3451,8 @@ def build_result_row(
     dialogue_output_text,
     thinking_text,
     error_message,
+    system_prompt_label="N/A",
+    system_prompt_text="",
 ):
     efficiency_score = calculate_efficiency_score(classification["TPS"], vram_metrics["VRAM_Peak_MiB"])
     retained_sections = build_retained_sections(thinking_text, dialogue_output_text)
@@ -3220,6 +3467,8 @@ def build_result_row(
         "Finish_Reason": classification["Finish_Reason"],
         "Backend": config["backend"],
         "Model": model,
+        "System_Prompt_Label": system_prompt_label,
+        "System_Prompt_Text": system_prompt_text,
         "Params": param_set.copy(),
         "Applied_Params": applied_params.copy(),
         "Config_Str": display_params,
@@ -3258,14 +3507,17 @@ def run_bench(config):
     param_keys = list(config["params"].keys())
     param_values = [config["params"][key] for key in param_keys]
     combos = [dict(zip(param_keys, combo)) for combo in product(*param_values)] if param_keys else [{}]
+    system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
+    include_system_prompt_in_label = len(system_prompt_variants) > 1 or system_prompt_variants[0]["label"] != "N/A"
 
     results = []
-    total_runs = len(config["models"]) * len(combos)
+    total_runs = len(config["models"]) * len(combos) * len(system_prompt_variants)
     vram_monitoring_enabled = query_nvidia_vram_snapshot() is not None
     config["vram_monitoring"] = "nvidia-smi" if vram_monitoring_enabled else "unavailable"
 
     print(f"\nStarting benchmark with {total_runs} runs. Mode: {capability_label}")
     print("Chat mode focuses on TPS/TTFT. Tools mode focuses on tool_call success and first event latency.")
+    print(f"System prompt variants: {len(system_prompt_variants)}")
     if vram_monitoring_enabled:
         print("VRAM monitoring: enabled via nvidia-smi")
     else:
@@ -3273,182 +3525,215 @@ def run_bench(config):
 
     run_index = 0
     for model in config["models"]:
-        for param_set in combos:
-            run_index += 1
-            applied_params = build_backend_options(config["backend"], param_set)
-            display_params = format_param_dict(param_set)
-            print(f"[{run_index}/{total_runs}] {model} | {display_params}")
-
-            request_kwargs = {}
-            if applied_params:
-                request_kwargs["extra_body"] = (
-                    {"options": applied_params}
-                    if config["backend"] == "ollama"
-                    else applied_params
+        for system_prompt_variant in system_prompt_variants:
+            for param_set in combos:
+                run_index += 1
+                applied_params = build_backend_options(config["backend"], param_set)
+                display_params = format_param_dict(param_set)
+                if include_system_prompt_in_label:
+                    display_params = f"{display_params} | system_prompt={system_prompt_variant['label']}"
+                print(
+                    f"[{run_index}/{total_runs}] {model} | {display_params}"
                 )
 
-            start_time = time.time()
-            first_event_time = None
-            first_content_time = None
-            first_thinking_time = None
-            dialogue_output_parts = []
-            thinking_parts = []
-            chunk_records = []
-            vram_monitor = NvidiaVRAMMonitor() if vram_monitoring_enabled else None
-            vram_metrics = empty_vram_metrics()
-            if vram_monitor is not None and not vram_monitor.start():
-                vram_monitor = None
+                request_kwargs = {}
+                if applied_params:
+                    request_kwargs["extra_body"] = (
+                        {"options": applied_params}
+                        if config["backend"] == "ollama"
+                        else applied_params
+                    )
 
-            try:
-                request_payload = build_chat_request_payload(config, model, request_kwargs)
-                stream = client.chat.completions.create(**request_payload)
+                start_time = time.time()
+                first_event_time = None
+                first_content_time = None
+                first_thinking_time = None
+                dialogue_output_parts = []
+                thinking_parts = []
+                chunk_records = []
+                vram_monitor = NvidiaVRAMMonitor() if vram_monitoring_enabled else None
+                vram_metrics = empty_vram_metrics()
+                if vram_monitor is not None and not vram_monitor.start():
+                    vram_monitor = None
 
-                for chunk in stream:
-                    event_time = time.time()
-                    if first_event_time is None:
-                        first_event_time = event_time
+                try:
+                    request_payload = build_chat_request_payload(
+                        config,
+                        model,
+                        request_kwargs,
+                        system_prompt_text=system_prompt_variant["text"],
+                    )
+                    stream = client.chat.completions.create(**request_payload)
 
-                    chunk_info = inspect_stream_chunk(chunk)
-                    chunk_records.append(chunk_info)
+                    for chunk in stream:
+                        event_time = time.time()
+                        if first_event_time is None:
+                            first_event_time = event_time
 
-                    if chunk_info["content"] and first_content_time is None:
-                        first_content_time = event_time
-                    if chunk_info["thinking"] and first_thinking_time is None:
-                        first_thinking_time = event_time
-                    if chunk_info["content"]:
-                        dialogue_output_parts.append(chunk_info["content"])
-                    if chunk_info["thinking"]:
-                        thinking_parts.append(chunk_info["thinking"])
+                        chunk_info = inspect_stream_chunk(chunk)
+                        chunk_records.append(chunk_info)
 
-                end_time = time.time()
-                if vram_monitor is not None:
-                    vram_metrics = vram_monitor.stop()
-                dialogue_output_text = "".join(dialogue_output_parts)
-                thinking_text = "".join(thinking_parts)
-                classification = classify_stream_result(
-                    chunk_records=chunk_records,
-                    start_time=start_time,
-                    end_time=end_time,
-                    first_event_time=first_event_time,
-                    first_content_time=first_content_time,
-                    first_thinking_time=first_thinking_time,
-                    error_message=None,
-                )
-                classification = adjust_classification_for_capability(classification, capability)
-                results.append(
-                    build_result_row(
-                        run_id=run_index,
-                        config=config,
-                        model=model,
-                        param_set=param_set,
-                        applied_params=applied_params,
-                        display_params=display_params,
-                        classification=classification,
-                        vram_metrics=vram_metrics,
-                        dialogue_output_text=dialogue_output_text,
-                        thinking_text=thinking_text,
+                        if chunk_info["content"] and first_content_time is None:
+                            first_content_time = event_time
+                        if chunk_info["thinking"] and first_thinking_time is None:
+                            first_thinking_time = event_time
+                        if chunk_info["content"]:
+                            dialogue_output_parts.append(chunk_info["content"])
+                        if chunk_info["thinking"]:
+                            thinking_parts.append(chunk_info["thinking"])
+
+                    end_time = time.time()
+                    if vram_monitor is not None:
+                        vram_metrics = vram_monitor.stop()
+                    dialogue_output_text = "".join(dialogue_output_parts)
+                    thinking_text = "".join(thinking_parts)
+                    classification = classify_stream_result(
+                        chunk_records=chunk_records,
+                        start_time=start_time,
+                        end_time=end_time,
+                        first_event_time=first_event_time,
+                        first_content_time=first_content_time,
+                        first_thinking_time=first_thinking_time,
                         error_message=None,
                     )
-                )
-            except Exception as exc:
-                end_time = time.time()
-                if vram_monitor is not None:
-                    vram_metrics = vram_monitor.stop()
-                dialogue_output_text = "".join(dialogue_output_parts)
-                thinking_text = "".join(thinking_parts)
-                classification = classify_stream_result(
-                    chunk_records=chunk_records,
-                    start_time=start_time,
-                    end_time=end_time,
-                    first_event_time=first_event_time,
-                    first_content_time=first_content_time,
-                    first_thinking_time=first_thinking_time,
-                    error_message=str(exc),
-                )
-                classification = adjust_classification_for_capability(classification, capability)
-                print(f"Error: {exc}")
-                results.append(
-                    build_result_row(
-                        run_id=run_index,
-                        config=config,
-                        model=model,
-                        param_set=param_set,
-                        applied_params=applied_params,
-                        display_params=display_params,
-                        classification=classification,
-                        vram_metrics=vram_metrics,
-                        dialogue_output_text=dialogue_output_text,
-                        thinking_text=thinking_text,
+                    classification = adjust_classification_for_capability(classification, capability)
+                    results.append(
+                        build_result_row(
+                            run_id=run_index,
+                            config=config,
+                            model=model,
+                            param_set=param_set,
+                            applied_params=applied_params,
+                            display_params=display_params,
+                            system_prompt_label=system_prompt_variant["label"],
+                            system_prompt_text=system_prompt_variant["text"],
+                            classification=classification,
+                            vram_metrics=vram_metrics,
+                            dialogue_output_text=dialogue_output_text,
+                            thinking_text=thinking_text,
+                            error_message=None,
+                        )
+                    )
+                except Exception as exc:
+                    end_time = time.time()
+                    if vram_monitor is not None:
+                        vram_metrics = vram_monitor.stop()
+                    dialogue_output_text = "".join(dialogue_output_parts)
+                    thinking_text = "".join(thinking_parts)
+                    classification = classify_stream_result(
+                        chunk_records=chunk_records,
+                        start_time=start_time,
+                        end_time=end_time,
+                        first_event_time=first_event_time,
+                        first_content_time=first_content_time,
+                        first_thinking_time=first_thinking_time,
                         error_message=str(exc),
                     )
-                )
+                    classification = adjust_classification_for_capability(classification, capability)
+                    print(f"Error: {exc}")
+                    results.append(
+                        build_result_row(
+                            run_id=run_index,
+                            config=config,
+                            model=model,
+                            param_set=param_set,
+                            applied_params=applied_params,
+                            display_params=display_params,
+                            system_prompt_label=system_prompt_variant["label"],
+                            system_prompt_text=system_prompt_variant["text"],
+                            classification=classification,
+                            vram_metrics=vram_metrics,
+                            dialogue_output_text=dialogue_output_text,
+                            thinking_text=thinking_text,
+                            error_message=str(exc),
+                        )
+                    )
 
     return pd.DataFrame(results)
 
 
-def save_markdown_report(df, config, report_stem):
+def save_markdown_report(df, config, report_stem, summary_excel_path=None):
     report_path = Path(f"{report_stem}.html")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
-    wrapped_summary_df = wrap_markdown_table_headers(summary_df)
-    wrapped_outcome_summary_df = wrap_markdown_table_headers(outcome_summary_df)
+    system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
+    localized_summary_df = localize_report_dataframe(summary_df)
+    localized_outcome_summary_df = localize_report_dataframe(outcome_summary_df)
     tool_call_success_summary_df = (
         build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
     )
-    wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(tool_call_success_summary_df)
+    localized_tool_call_success_summary_df = localize_report_dataframe(tool_call_success_summary_df)
+    summary_download_href = Path(summary_excel_path).name if summary_excel_path else None
 
     matrix_rows = [
-        ("Backend", config["backend"]),
-        ("Capability", capability),
-        ("Base URL", config.get("url", "N/A")),
-        ("Models", ", ".join(config.get("models", []))),
-        ("Prompt", config.get("prompt", "")),
-        ("Note", "TPS is estimated from streaming content chunks for relative comparison."),
+        (bilingual_text("Backend", "後端"), config["backend"]),
+        (bilingual_text("Capability", "能力模式"), localize_capability_value(capability)),
+        (bilingual_text("Base URL", "基礎網址"), config.get("url", "N/A")),
+        (bilingual_text("Models", "模型"), ", ".join(config.get("models", []))),
+        (bilingual_text("Prompt", "使用者提示"), config.get("prompt", "")),
+        (
+            bilingual_text("System Prompt Count", "系統提示數量"),
+            len(system_prompt_variants),
+        ),
+        (
+            bilingual_text("System Prompt Variants", "系統提示變體"),
+            ", ".join(variant["label"] for variant in system_prompt_variants),
+        ),
+        (
+            bilingual_text("Note", "備註"),
+            "TPS is estimated from streaming content chunks for relative comparison. / "
+            "TPS 以帶文字內容的串流片段估算，適合做相對比較。",
+        ),
     ]
     if capability == "tools":
         matrix_rows.append(
             (
-                "Tool Mode Note",
+                bilingual_text("Tool Mode Note", "工具模式備註"),
                 "Successful tool-calling runs may not emit text tokens, so `TPS` and `TTFT` can be `N/A`; "
-                "focus on `Output Category=tool_call` and `First Event (s)`.",
+                "focus on `Output Category=tool_call` and `First Event (s)`. / "
+                "工具呼叫成功時可能不會輸出文字，因此 `TPS` 和 `TTFT` 可能是 `N/A`；"
+                "請優先看 `Output Category=tool_call` 與 `First Event (s)`。",
             )
         )
 
-    environment_notes = [f"VRAM monitoring: {config.get('vram_monitoring', 'unavailable')}"]
+    environment_notes = [
+        f"VRAM monitoring: {config.get('vram_monitoring', 'unavailable')} / "
+        f"顯存監控: {config.get('vram_monitoring', 'unavailable')}"
+    ]
     metric_notes = [
-        "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks.",
-        "`Total Output (chars)`: Total visible dialogue output character count retained for the run.",
-        "`Total Output Time (s)`: Time from the first output text chunk to stream end.",
-        "`Thinking TPS (char/s)`: Estimated throughput of retained thinking text from the first thinking payload to stream end.",
-        "`Output TPS (char/s)`: Estimated throughput of final dialogue output text from the first output text chunk to stream end.",
-        "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text.",
-        "`TTFT (s)`: Time to first text chunk.",
-        "`First Event (s)`: Time to the first streamed event of any kind.",
-        "`VRAM Peak (MiB)`: Highest observed total NVIDIA GPU memory usage during a run.",
-        "`Efficiency Score (TPS/GiB Peak)`: `TPS / (VRAM Peak in GiB)` when both values are available.",
+        "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks. / 以含文字的串流片段估算輸出速度。",
+        "`Total Output (chars)`: Total visible dialogue output character count retained for the run. / 本次保留的可見回覆總字數。",
+        "`Total Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
+        "`Thinking TPS (char/s)`: Estimated throughput of retained thinking text from the first thinking payload to stream end. / 從第一段 thinking 到結束的思考文字速率。",
+        "`Output TPS (char/s)`: Estimated throughput of final dialogue output text from the first output text chunk to stream end. / 從第一段輸出文字到結束的回覆速率。",
+        "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text. / 回覆字數除以 thinking 字數，越高代表可見答案佔比越高。",
+        "`TTFT (s)`: Time to first text chunk. / 首段文字輸出的延遲。",
+        "`First Event (s)`: Time to the first streamed event of any kind. / 第一個串流事件出現的延遲。",
+        "`VRAM Peak (MiB)`: Highest observed total NVIDIA GPU memory usage during a run. / 單次測試觀測到的最高總顯存使用量。",
+        "`Efficiency Score (TPS/GiB Peak)`: `TPS / (VRAM Peak in GiB)` when both values are available. / 兩者都有值時，以 `TPS / 顯存峰值 GiB` 計算效率。",
     ]
     retained_text_notes = [
-        "`thinking`: Reasoning/thinking text captured from non-content reasoning payloads when the backend exposed them.",
-        "`dialogue_output`: Final conversational text emitted in normal content chunks.",
-        "If neither exists for a run, the retained sections list will be `none`.",
+        "`thinking`: Reasoning/thinking text captured from non-content reasoning payloads when the backend exposed them. / 後端有提供時，從 reasoning 類 payload 保留的思考文字。",
+        "`dialogue_output`: Final conversational text emitted in normal content chunks. / 一般 content chunk 中輸出的最終對話文字。",
+        "If neither exists for a run, the retained sections list will be `none`. / 若兩者都沒有，保留欄位會顯示 `none`。",
     ]
     output_diagnosis_notes = [
-        "`normal_content`: Received text output as expected for chat benchmarking.",
-        "`tool_call`: Received `tool_calls` payload as expected for tool benchmarking.",
-        "`text_reply_without_tool`: Returned text, but did not emit any tool call in tool mode.",
-        "`empty_reply`: Stream completed without text output.",
-        "`non_content_stream`: Stream only carried non-text payloads.",
-        "`early_stop`: Stream ended before a complete reply or tool call was received.",
+        "`normal_content`: Received text output as expected for chat benchmarking. / 收到正常文字輸出。",
+        "`tool_call`: Received `tool_calls` payload as expected for tool benchmarking. / 收到工具呼叫 payload。",
+        "`text_reply_without_tool`: Returned text, but did not emit any tool call in tool mode. / 工具模式下只回文字、沒有呼叫工具。",
+        "`empty_reply`: Stream completed without text output. / 串流結束但沒有文字輸出。",
+        "`non_content_stream`: Stream only carried non-text payloads. / 串流只有非文字 payload。",
+        "`early_stop`: Stream ended before a complete reply or tool call was received. / 在完整回覆或工具呼叫前就中斷。",
     ]
 
     page_parts = [
         "<!DOCTYPE html>",
-        '<html lang="en">',
+        '<html lang="zh-Hant">',
         "<head>",
         '<meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        "<title>Benchmark Report</title>",
+        "<title>Benchmark Report / 基準測試報告</title>",
         """<style>
 body {
     margin: 0;
@@ -3496,6 +3781,14 @@ p {
     padding: 22px 24px;
     margin-top: 20px;
     box-shadow: 0 10px 28px rgba(76, 61, 36, 0.06);
+}
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
 }
 .table-wrap {
     overflow-x: auto;
@@ -3559,55 +3852,103 @@ th {
     color: #6f7c88;
     text-align: center;
 }
-</style>""",
+.download-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid #b88a44;
+    background: #d9a84c;
+    color: #1f2933;
+    text-decoration: none;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.download-button:hover {
+    background: #e4b45e;
+}
+        </style>""",
         "</head>",
         "<body>",
         '<main class="page">',
-        "<h1>Benchmark Report</h1>",
-        '<p class="lead">Same benchmark content, rendered as HTML for clearer sections and more stable table layout.</p>',
+        f"<h1>{bilingual_text('Benchmark Report', '基準測試報告')}</h1>",
+        '<p class="lead">Same benchmark content, rendered as HTML for clearer sections and more stable table layout. / 保留原本 benchmark 內容，只將排版改成較穩定且較容易閱讀的 HTML 報告。</p>',
         '<section class="section">',
-        "<h2>Test Matrix</h2>",
+        f"<h2>{bilingual_text('Test Matrix', '測試矩陣')}</h2>",
         '<div class="table-wrap">',
         key_value_rows_to_html_table(matrix_rows, table_class="matrix-table"),
         "</div>",
         "</section>",
         '<section class="section">',
-        "<h2>Environment Notes</h2>",
+        f"<h2>{bilingual_text('System Prompt Variants', '系統提示變體')}</h2>",
+    ]
+
+    if system_prompt_variants[0]["label"] == "N/A" and len(system_prompt_variants) == 1:
+        page_parts.append(
+            '<p class="empty-note">No extra system prompt was used. / 本次未額外加入 system prompt。</p>'
+        )
+    else:
+        page_parts.append('<div class="run-grid">')
+        for variant in system_prompt_variants:
+            page_parts.extend(
+                [
+                    '<article class="run-card">',
+                    f"<h3>{bilingual_text(variant['label'], '系統提示變體')}</h3>",
+                    f'<pre class="text-block">{html_escape_text(normalize_output_text(variant["text"]))}</pre>',
+                    "</article>",
+                ]
+            )
+        page_parts.append("</div>")
+
+    page_parts.extend(
+        [
+        "</section>",
+        '<section class="section">',
+        f"<h2>{bilingual_text('Environment Notes', '環境說明')}</h2>",
         bullet_list_to_html(environment_notes),
         "</section>",
         '<section class="section">',
-        "<h2>Metric Notes</h2>",
+        f"<h2>{bilingual_text('Metric Notes', '指標說明')}</h2>",
         bullet_list_to_html(metric_notes),
         "</section>",
         '<section class="section">',
-        "<h2>Retained Text Notes</h2>",
+        f"<h2>{bilingual_text('Retained Text Notes', '保留文字說明')}</h2>",
         bullet_list_to_html(retained_text_notes),
         "</section>",
         '<section class="section">',
-        "<h2>Output Diagnosis Notes</h2>",
+        f"<h2>{bilingual_text('Output Diagnosis Notes', '輸出診斷說明')}</h2>",
         bullet_list_to_html(output_diagnosis_notes),
         "</section>",
         '<section class="section">',
-        "<h2>Summary</h2>",
+        '<div class="section-header">',
+        f"<h2>{bilingual_text('Summary', '摘要')}</h2>",
+        build_download_button(
+            summary_download_href,
+            "Download Excel / 下載 Excel 摘要",
+        ),
+        "</div>",
         '<div class="table-wrap">',
-        dataframe_to_html_table(wrapped_summary_df),
+        dataframe_to_html_table(localized_summary_df),
         "</div>",
         "</section>",
         '<section class="section">',
-        "<h2>Outcome Summary</h2>",
+        f"<h2>{bilingual_text('Outcome Summary', '結果摘要')}</h2>",
         '<div class="table-wrap">',
-        dataframe_to_html_table(wrapped_outcome_summary_df),
+        dataframe_to_html_table(localized_outcome_summary_df),
         "</div>",
         "</section>",
     ]
+    )
 
     if capability == "tools" and not tool_call_success_summary_df.empty:
         page_parts.extend(
             [
                 '<section class="section">',
-                "<h2>Tool Call Success by Model</h2>",
+                f"<h2>{bilingual_text('Tool Call Success by Model', '各模型工具呼叫成功統計')}</h2>",
                 '<div class="table-wrap">',
-                dataframe_to_html_table(wrapped_tool_call_success_summary_df),
+                dataframe_to_html_table(localized_tool_call_success_summary_df),
                 "</div>",
                 "</section>",
             ]
@@ -3616,7 +3957,7 @@ th {
     page_parts.extend(
         [
             '<section class="section">',
-            "<h2>Generated Outputs</h2>",
+            f"<h2>{bilingual_text('Generated Outputs', '各次執行輸出')}</h2>",
             '<div class="run-grid">',
         ]
     )
@@ -3625,50 +3966,66 @@ th {
         params_json = json.dumps(row["Params"], ensure_ascii=False)
         applied_params_json = json.dumps(row["Applied_Params"], ensure_ascii=False)
         retained_sections = row.get("Retained_Sections", []) or []
-        retained_sections_label = ", ".join(retained_sections) if retained_sections else "none"
+        retained_sections_label = (
+            ", ".join(
+                {
+                    "thinking": bilingual_text("thinking", "思考內容"),
+                    "dialogue_output": bilingual_text("dialogue_output", "對話輸出"),
+                }.get(section, section)
+                for section in retained_sections
+            )
+            if retained_sections
+            else bilingual_text("none", "無")
+        )
         thinking_text = row.get("Thinking_Text", "")
         dialogue_output_text = row.get("Dialogue_Output_Text", row.get("Output_Text", ""))
+        system_prompt_text = row.get("System_Prompt_Text", "")
 
         detail_rows = [
-            ("Status", row["Status"]),
-            ("Capability", row.get("Capability", capability)),
-            ("Output Category", row["Output_Category"]),
-            ("Diagnosis", row["Diagnosis"]),
-            ("Finish Reason", format_text_value(row["Finish_Reason"])),
-            ("Backend", row["Backend"]),
-            ("Model", row["Model"]),
-            ("Params", params_json),
-            ("Applied Params", applied_params_json),
-            ("Retained Sections", retained_sections_label),
-            ("Thinking Chars", int(row.get("Thinking_Chars", len(thinking_text)))),
-            ("Dialogue Output Chars", int(row.get("Dialogue_Output_Chars", len(dialogue_output_text)))),
-            ("TPS", f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
-            ("Thinking TPS", f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
-            ("Output TPS", f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
-            ("Output/Thinking Ratio", format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
-            ("TTFT", f"{format_numeric_value(row['TTFT'], 3)} s"),
-            ("First Event", f"{format_numeric_value(row['First_Event_s'], 3)} s"),
-            ("Stream Duration", f"{format_numeric_value(row['Stream_Duration_s'], 3)} s"),
-            ("Total Chunks", int(row["Total_Chunks"])),
-            ("Content Chunks", int(row["Content_Chunks"])),
-            ("Non-Content Chunks", int(row["Non_Content_Chunks"])),
-            ("Non-Content Types", row["Non_Content_Types"]),
-            ("VRAM Base", format_mib_value(row["VRAM_Base_MiB"])),
-            ("VRAM Peak", format_mib_value(row["VRAM_Peak_MiB"])),
-            ("VRAM Delta", format_mib_value(row["VRAM_Delta_MiB"])),
-            ("VRAM Detail", row["VRAM_Detail"]),
+            (bilingual_text("Status", "狀態"), localize_status_value(row["Status"])),
+            (bilingual_text("Capability", "能力模式"), localize_capability_value(row.get("Capability", capability))),
+            (bilingual_text("Output Category", "輸出分類"), localize_output_category_value(row["Output_Category"])),
+            (bilingual_text("Diagnosis", "診斷"), row["Diagnosis"]),
+            (bilingual_text("Finish Reason", "結束原因"), localize_finish_reason_value(format_text_value(row["Finish_Reason"]))),
+            (bilingual_text("Backend", "後端"), row["Backend"]),
+            (bilingual_text("Model", "模型"), row["Model"]),
+            (bilingual_text("System Prompt", "系統提示"), localize_system_prompt_label(row.get("System_Prompt_Label", "N/A"))),
+            (bilingual_text("System Prompt Chars", "系統提示字數"), len(system_prompt_text)),
+            (bilingual_text("Params", "參數"), params_json),
+            (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
+            (bilingual_text("Retained Sections", "保留區塊"), retained_sections_label),
+            (bilingual_text("Thinking Chars", "思考字數"), int(row.get("Thinking_Chars", len(thinking_text)))),
             (
-                "Efficiency Score",
+                bilingual_text("Dialogue Output Chars", "對話輸出字數"),
+                int(row.get("Dialogue_Output_Chars", len(dialogue_output_text))),
+            ),
+            (bilingual_text("TPS", "輸出速率"), f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
+            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
+            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
+            (bilingual_text("Output/Thinking Ratio", "輸出思考比"), format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
+            (bilingual_text("TTFT", "首字延遲"), f"{format_numeric_value(row['TTFT'], 3)} s"),
+            (bilingual_text("First Event", "首事件時間"), f"{format_numeric_value(row['First_Event_s'], 3)} s"),
+            (bilingual_text("Stream Duration", "串流總時長"), f"{format_numeric_value(row['Stream_Duration_s'], 3)} s"),
+            (bilingual_text("Total Chunks", "總片段數"), int(row["Total_Chunks"])),
+            (bilingual_text("Content Chunks", "文字片段數"), int(row["Content_Chunks"])),
+            (bilingual_text("Non-Content Chunks", "非文字片段數"), int(row["Non_Content_Chunks"])),
+            (bilingual_text("Non-Content Types", "非文字類型"), row["Non_Content_Types"]),
+            (bilingual_text("VRAM Base", "起始顯存"), format_mib_value(row["VRAM_Base_MiB"])),
+            (bilingual_text("VRAM Peak", "顯存峰值"), format_mib_value(row["VRAM_Peak_MiB"])),
+            (bilingual_text("VRAM Delta", "顯存增量"), format_mib_value(row["VRAM_Delta_MiB"])),
+            (bilingual_text("VRAM Detail", "顯存細節"), row["VRAM_Detail"]),
+            (
+                bilingual_text("Efficiency Score", "效率分數"),
                 f"{format_numeric_value(row['Efficiency_Score'], 3)} TPS/GiB Peak",
             ),
         ]
         if row["Error"]:
-            detail_rows.append(("Error", row["Error"]))
+            detail_rows.append((bilingual_text("Error", "錯誤"), row["Error"]))
 
         page_parts.extend(
             [
                 '<article class="run-card">',
-                f"<h3>Run {html_escape_text(row['Run_ID'])}</h3>",
+                f"<h3>{bilingual_text('Run ' + str(row['Run_ID']), f'第 {row['Run_ID']} 次執行')}</h3>",
                 key_value_rows_to_html_table(detail_rows),
             ]
         )
@@ -3676,7 +4033,7 @@ th {
         if thinking_text:
             page_parts.extend(
                 [
-                    "<h4>thinking</h4>",
+                    f"<h4>{bilingual_text('thinking', '思考內容')}</h4>",
                     f'<pre class="text-block">{html_escape_text(normalize_output_text(thinking_text))}</pre>',
                 ]
             )
@@ -3684,14 +4041,14 @@ th {
         if dialogue_output_text:
             page_parts.extend(
                 [
-                    "<h4>dialogue_output</h4>",
+                    f"<h4>{bilingual_text('dialogue_output', '對話輸出')}</h4>",
                     f'<pre class="text-block">{html_escape_text(normalize_output_text(dialogue_output_text))}</pre>',
                 ]
             )
 
         if not thinking_text and not dialogue_output_text:
             page_parts.append(
-                '<p class="empty-note">No retained thinking or dialogue output text for this run.</p>'
+                '<p class="empty-note">No retained thinking or dialogue output text for this run. / 這次執行沒有保留 thinking 或 dialogue output 文字。</p>'
             )
 
         page_parts.append("</article>")
@@ -3841,7 +4198,8 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
                 (
                     "class:subtitle",
                     "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
-                    "Type numbers in Values | Backspace deletes | d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
+                    "Type numbers in Values | Backspace deletes or goes back from State | "
+                    "d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
                 ),
             ]
         )
@@ -3913,7 +4271,7 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
     return fragments
 
 
-def edit_param_grid(backend):
+def edit_param_grid(backend, initial_params=None):
     from prompt_toolkit.application import Application
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.keys import Keys
@@ -3922,6 +4280,10 @@ def edit_param_grid(backend):
     from prompt_toolkit.styles import Style
 
     rows = build_param_rows(backend)
+    for row in rows:
+        if initial_params and row.key in initial_params:
+            row.enabled = True
+            row.raw_value = ", ".join(str(value) for value in initial_params[row.key])
     state = {
         "row_index": 0,
         "column_index": 0,
@@ -3932,6 +4294,10 @@ def edit_param_grid(backend):
     def set_message(text, style="class:hint"):
         state["message"] = text
         state["message_style"] = style
+
+    def refresh(event):
+        if event is not None and getattr(event, "app", None):
+            event.app.invalidate()
 
     def current_row():
         return rows[state["row_index"]]
@@ -4001,6 +4367,7 @@ def edit_param_grid(backend):
             state["row_index"] = error_row_index
             state["column_index"] = 1
             set_message(error_message, "class:status.error")
+            refresh(event)
             return
         event.app.exit(result=params or {})
 
@@ -4040,37 +4407,47 @@ def edit_param_grid(backend):
     @kb.add("up")
     def _(event):
         move_row(-1)
+        refresh(event)
 
     @kb.add("down")
     def _(event):
         move_row(1)
+        refresh(event)
 
     @kb.add("left")
     def _(event):
         move_column(-1)
+        refresh(event)
 
     @kb.add("right")
     def _(event):
         move_column(1)
+        refresh(event)
 
     @kb.add("tab")
     def _(event):
         move_column(1)
+        refresh(event)
 
     @kb.add("s-tab")
     def _(event):
         move_column(-1)
+        refresh(event)
 
     @kb.add("space")
     def _(event):
         if state["column_index"] == 0:
             toggle_current_row()
+            refresh(event)
 
     @kb.add("backspace")
     @kb.add("c-h")
     def _(event):
         if state["column_index"] == 1:
             backspace_value()
+            refresh(event)
+        else:
+            event.app.exit(result=BACK_ACTION)
 
     @kb.add("delete")
     def _(event):
@@ -4078,10 +4455,12 @@ def edit_param_grid(backend):
             current_row().raw_value = ""
             current_row().enabled = True
             set_message(f"Cleared {current_row().key}.", "class:hint")
+            refresh(event)
 
     @kb.add("d")
     def _(event):
         restore_default()
+        refresh(event)
 
     @kb.add("enter")
     @kb.add("c-s")
@@ -4102,6 +4481,7 @@ def edit_param_grid(backend):
         if not char or char not in ALLOWED_VALUE_CHARS:
             return
         append_value(char)
+        refresh(event)
 
     application = Application(
         layout=Layout(root_container),
@@ -4113,9 +4493,261 @@ def edit_param_grid(backend):
     return application.run()
 
 
+def parse_system_prompt_blocks(raw_text, expected_count):
+    normalized = (raw_text or "").replace("\r\n", "\n").strip()
+    if expected_count <= 0:
+        return []
+
+    blocks = [
+        block.strip()
+        for block in re.split(r"(?m)^\s*---\s*$", normalized)
+        if block.strip()
+    ]
+    if len(blocks) != expected_count:
+        raise ValueError(
+            f"Expected {expected_count} system prompt blocks, but found {len(blocks)}. "
+            "Use a line containing only --- between prompts."
+        )
+    return blocks
+
+
+def edit_system_prompt_blocks(expected_count):
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.widgets import Frame, TextArea
+
+    text_area = TextArea(
+        text="",
+        multiline=True,
+        scrollbar=True,
+        line_numbers=True,
+        wrap_lines=False,
+        focus_on_click=True,
+    )
+    state = {
+        "message": (
+            f"Paste {expected_count} system prompt block(s). Use --- on its own line as a separator. "
+            "Ctrl-S saves, Esc cancels."
+        ),
+        "style": "class:hint",
+    }
+
+    def set_message(text, style):
+        state["message"] = text
+        state["style"] = style
+
+    kb = KeyBindings()
+
+    @kb.add("c-s")
+    def save_editor(event):
+        try:
+            prompts = parse_system_prompt_blocks(text_area.text, expected_count)
+        except ValueError as exc:
+            set_message(str(exc), "class:status.error")
+            return
+        event.app.exit(result=prompts)
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def cancel_editor(event):
+        event.app.exit(result=None)
+
+    @kb.add("backspace")
+    @kb.add("c-h")
+    def go_back(event):
+        if text_area.text:
+            return
+        event.app.exit(result=BACK_ACTION)
+
+    root_container = HSplit(
+        [
+            Window(
+                height=4,
+                content=FormattedTextControl(
+                    lambda: [
+                        ("class:title", "System Prompt Editor / 系統提示編輯器\n"),
+                        (
+                            "class:subtitle",
+                            "Paste multiple system prompts here. Use --- on its own line as a separator.\n"
+                            "可在這裡直接貼上多段 system prompt，段落之間用單獨一行的 --- 分隔。\n",
+                        ),
+                    ]
+                ),
+            ),
+            Frame(text_area, title="System Prompt Blocks / 系統提示區塊"),
+            Window(
+                height=2,
+                content=FormattedTextControl(lambda: [(state["style"], state["message"])]),
+            ),
+        ]
+    )
+
+    app = Application(
+        layout=Layout(root_container, focused_element=text_area),
+        key_bindings=kb,
+        full_screen=True,
+        mouse_support=True,
+        style=Style.from_dict(
+            {
+                "title": "bold ansicyan",
+                "subtitle": "ansibrightblack",
+                "frame.label": "bold ansiyellow",
+                "status.error": "bold ansired",
+                "hint": "ansicyan",
+            }
+        ),
+    )
+    return app.run()
+
+
+def merge_instruction_text(instruction, back_hint):
+    if instruction:
+        return f"{instruction} {back_hint}"
+    return back_hint
+
+
+def attach_backspace_binding(question, empty_text_only=False):
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+    from prompt_toolkit.keys import Keys
+
+    bindings = KeyBindings()
+    app = question.application
+
+    if empty_text_only:
+        active_filter = Condition(
+            lambda: not getattr(getattr(app, "current_buffer", None), "text", "")
+        )
+    else:
+        active_filter = True
+
+    @bindings.add(Keys.Backspace, eager=True, filter=active_filter)
+    @bindings.add(Keys.ControlH, eager=True, filter=active_filter)
+    def go_back(event):
+        event.app.exit(result=BACK_ACTION)
+
+    app.key_bindings = merge_key_bindings([app.key_bindings, bindings])
+    return question
+
+
+def ask_select_with_back(message, choices, default=None, instruction=None):
+    question = questionary.select(
+        message,
+        choices=choices,
+        default=default,
+        instruction=merge_instruction_text(
+            instruction,
+            "(Backspace: previous step / Backspace 返回上一階段)",
+        ),
+    )
+    return attach_backspace_binding(question).ask()
+
+
+def ask_checkbox_with_back(message, choices, instruction=None):
+    question = questionary.checkbox(
+        message,
+        choices=choices,
+        instruction=merge_instruction_text(
+            instruction,
+            "(Space: select | Backspace: previous step / Space 勾選 | Backspace 返回上一階段)",
+        ),
+    )
+    return attach_backspace_binding(question).ask()
+
+
+def ask_text_with_back(message, default="", instruction=None):
+    question = questionary.text(
+        message,
+        default=default,
+        instruction=merge_instruction_text(
+            instruction,
+            "(Backspace on empty input: previous step / 空白時按 Backspace 返回上一階段)",
+        ),
+    )
+    return attach_backspace_binding(question, empty_text_only=True).ask()
+
+
+def ask_confirm_with_back(message, default=True, instruction=None):
+    question = questionary.confirm(
+        message,
+        default=default,
+        instruction=merge_instruction_text(
+            instruction,
+            "(Enter: confirm | Backspace: previous step / Enter 確認 | Backspace 返回上一階段)",
+        ),
+    )
+    return attach_backspace_binding(question).ask()
+
+
+def select_system_prompt_variants(existing_prompts=None):
+    existing_prompts = existing_prompts or []
+    if not existing_prompts:
+        default_selection = 0
+    elif len(existing_prompts) in (1, 2, 3):
+        default_selection = len(existing_prompts)
+    else:
+        default_selection = "custom"
+
+    while True:
+        selection = ask_select_with_back(
+            "System prompt variants / 系統提示變體:",
+            choices=[
+                Choice("N/A | no extra system prompt / 不額外加入 system prompt", value=0),
+                Choice("1 variant / 1 種", value=1),
+                Choice("2 variants / 2 種", value=2),
+                Choice("3 variants / 3 種", value=3),
+                Choice("Custom count / 自訂數量", value="custom"),
+            ],
+            default=default_selection,
+        )
+        if selection is None:
+            return None
+        if selection == BACK_ACTION:
+            return BACK_ACTION
+        if selection == 0:
+            return []
+
+        expected_count = selection
+        if selection == "custom":
+            while True:
+                raw_count = ask_text_with_back(
+                    "How many system prompt variants? / 要測幾種 system prompt？",
+                    default=str(len(existing_prompts) or 1),
+                )
+                if raw_count is None:
+                    return None
+                if raw_count == BACK_ACTION:
+                    break
+                try:
+                    expected_count = int((raw_count or "").strip())
+                except ValueError:
+                    print("System prompt count must be an integer. / system prompt 數量必須是整數。")
+                    continue
+                if expected_count < 0:
+                    print("System prompt count cannot be negative. / system prompt 數量不能小於 0。")
+                    continue
+                if expected_count == 0:
+                    return []
+                break
+            if raw_count == BACK_ACTION:
+                continue
+
+        prompts = edit_system_prompt_blocks(expected_count)
+        if prompts is None:
+            print("System prompt editor cancelled. / system prompt 編輯已取消。")
+            return None
+        if prompts == BACK_ACTION:
+            continue
+        return prompts
+
+
 def print_config_review(config):
     params = config["params"]
     combo_count = estimate_combo_count(params) if params else 1
+    system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
 
     print("\n" + "=" * 62)
     print("Config Review")
@@ -4126,12 +4758,21 @@ def print_config_review(config):
     print(f"- Models: {', '.join(config['models'])}")
     print(f"- Param count: {len(params)}")
     print(f"- Combination count: {combo_count}")
+    print(f"- System prompt variants: {len(system_prompt_variants)}")
     if params:
         print("- Parameter values:")
         for key, values in params.items():
             print(f"  - {key}: {values}")
     else:
         print("- Parameter values: use backend defaults only")
+    if system_prompt_variants[0]["label"] == "N/A" and len(system_prompt_variants) == 1:
+        print("- System prompts: N/A")
+    else:
+        print("- System prompt previews:")
+        for variant in system_prompt_variants:
+            preview = variant["text"].splitlines()[0] if variant["text"] else ""
+            preview = preview[:90] + ("..." if len(preview) > 90 else "")
+            print(f"  - {variant['label']}: {preview} ({len(variant['text'])} chars)")
 
 
 def build_console_summary_dataframe(results_df):
@@ -4139,6 +4780,8 @@ def build_console_summary_dataframe(results_df):
     console_columns = ["Run", "Status"]
     if "Capability" in summary_df.columns:
         console_columns.append("Capability")
+    if "System Prompt" in summary_df.columns:
+        console_columns.append("System Prompt")
     console_columns.extend(
         [
             "Output Category",
@@ -4161,63 +4804,128 @@ def interactive_config():
     print("\n" + "=" * 62)
     print("LLM Benchmark")
     print("=" * 62)
+    state = {}
+    stage_index = 0
 
-    backend = questionary.select(
-        "Select backend:",
-        choices=[
-            Choice("Ollama", value="ollama"),
-            Choice("llama.cpp (llama-server)", value="llama.cpp"),
-        ],
-    ).ask()
-    if not backend:
-        return None
+    while True:
+        if stage_index == 0:
+            backend = ask_select_with_back(
+                "Select backend:",
+                choices=[
+                    Choice("Ollama", value="ollama"),
+                    Choice("llama.cpp (llama-server)", value="llama.cpp"),
+                ],
+                default=state.get("backend"),
+            )
+            if backend in (None, BACK_ACTION):
+                return None
+            if backend != state.get("backend"):
+                state.pop("url", None)
+                state.pop("models", None)
+                state.pop("params", None)
+            state["backend"] = backend
+            stage_index = 1
+            continue
 
-    capability = questionary.select(
-        "Select benchmark mode:",
-        choices=[
-            Choice("Chat | Standard chat response benchmark", value="chat"),
-            Choice("Tools | Check whether the model emits tool_calls", value="tools"),
-        ],
-    ).ask()
-    if not capability:
-        return None
+        if stage_index == 1:
+            capability = ask_select_with_back(
+                "Select benchmark mode:",
+                choices=[
+                    Choice("Chat | Standard chat response benchmark", value="chat"),
+                    Choice("Tools | Check whether the model emits tool_calls", value="tools"),
+                ],
+                default=state.get("capability"),
+            )
+            if capability is None:
+                return None
+            if capability == BACK_ACTION:
+                stage_index = 0
+                continue
+            state["capability"] = capability
+            stage_index = 2
+            continue
 
-    url, models = select_models_and_url(backend)
-    if not models:
-        print("No models available. Cancelled.")
-        return None
+        if stage_index == 2:
+            model_result = select_models_and_url(
+                state["backend"],
+                previous_url=state.get("url"),
+                previous_models=state.get("models"),
+            )
+            if model_result is None:
+                return None
+            if model_result == BACK_ACTION:
+                stage_index = 1
+                continue
+            url, models = model_result
+            if not models:
+                print("No models available. Cancelled.")
+                return None
+            state["url"] = url
+            state["models"] = models
+            stage_index = 3
+            continue
 
-    final_params = edit_param_grid(backend)
-    if final_params is None:
-        print("Parameter grid cancelled.")
-        return None
+        if stage_index == 3:
+            final_params = edit_param_grid(state["backend"], initial_params=state.get("params"))
+            if final_params is None:
+                print("Parameter grid cancelled.")
+                return None
+            if final_params == BACK_ACTION:
+                stage_index = 2
+                continue
+            state["params"] = final_params
+            stage_index = 4
+            continue
 
-    prompt = questionary.text(
-        "Benchmark prompt:",
-        default=CAPABILITY_DEFAULTS[capability],
-    ).ask()
-    if prompt is None:
-        return None
+        if stage_index == 4:
+            prompt = ask_text_with_back(
+                "Benchmark prompt:",
+                default=state.get("prompt", CAPABILITY_DEFAULTS[state["capability"]]),
+            )
+            if prompt is None:
+                return None
+            if prompt == BACK_ACTION:
+                stage_index = 3
+                continue
+            state["prompt"] = prompt
+            stage_index = 5
+            continue
 
-    config = {
-        "backend": backend,
-        "capability": capability,
-        "url": url,
-        "models": models,
-        "params": final_params,
-        "prompt": prompt,
-    }
+        if stage_index == 5:
+            system_prompts = select_system_prompt_variants(state.get("system_prompts"))
+            if system_prompts is None:
+                return None
+            if system_prompts == BACK_ACTION:
+                stage_index = 4
+                continue
+            state["system_prompts"] = system_prompts
+            stage_index = 6
+            continue
 
-    print_config_review(config)
-    confirmed = questionary.confirm(
-        "Start benchmark with this configuration?",
-        default=True,
-    ).ask()
-    if not confirmed:
-        print("Cancelled before benchmark run.")
-        return None
+        config = {
+            "backend": state["backend"],
+            "capability": state["capability"],
+            "url": state["url"],
+            "models": state["models"],
+            "params": state.get("params", {}),
+            "prompt": state["prompt"],
+            "system_prompts": state.get("system_prompts", []),
+        }
 
-    return config
+        print_config_review(config)
+        confirmed = ask_confirm_with_back(
+            "Start benchmark with this configuration?",
+            default=True,
+        )
+        if confirmed is None:
+            return None
+        if confirmed == BACK_ACTION:
+            stage_index = 5
+            continue
+        if not confirmed:
+            print("Cancelled before benchmark run.")
+            return None
+        return config
 
 
 def main():
@@ -4246,9 +4954,20 @@ def main():
 
     report_path = None
     chart_path = None
+    summary_excel_path = None
 
     try:
-        report_path = save_markdown_report(results_df, config, report_stem)
+        summary_excel_path = save_summary_excel_workbook(results_df, config, report_stem)
+    except Exception as exc:
+        print(f"Summary Excel export failed: {exc}")
+
+    try:
+        report_path = save_markdown_report(
+            results_df,
+            config,
+            report_stem,
+            summary_excel_path=summary_excel_path,
+        )
     except Exception as exc:
         print(f"Report generation failed: {exc}")
 
@@ -4267,6 +4986,8 @@ def main():
         print(f"\nSaved report: {report_path}")
     else:
         print("\nMarkdown report was not saved.")
+    if summary_excel_path:
+        print(f"Saved summary Excel: {summary_excel_path}")
 
     print(f"Saved raw outputs: {raw_outputs_path}")
     if chart_path:

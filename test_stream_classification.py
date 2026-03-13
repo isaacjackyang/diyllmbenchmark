@@ -265,8 +265,10 @@ class StreamClassificationTests(unittest.TestCase):
             report_text = Path(report_path).read_text(encoding="utf-8")
 
         self.assertEqual(Path(report_path).suffix, ".html")
-        self.assertIn("<h2>Test Matrix</h2>", report_text)
-        self.assertIn("<h2>Generated Outputs</h2>", report_text)
+        self.assertIn("Test Matrix", report_text)
+        self.assertIn("測試矩陣", report_text)
+        self.assertIn("Generated Outputs", report_text)
+        self.assertIn("各次執行輸出", report_text)
         self.assertIn("Output Category", report_text)
         self.assertIn("empty_reply", report_text)
         self.assertIn("Diagnosis", report_text)
@@ -342,6 +344,24 @@ class StreamClassificationTests(unittest.TestCase):
         self.assertEqual(payload["tool_choice"], "auto")
         self.assertIn("tools", payload)
         self.assertEqual(payload["messages"][0]["role"], "system")
+
+    def test_chat_request_payload_includes_custom_system_prompt(self):
+        config = {
+            "backend": "ollama",
+            "capability": "chat",
+            "prompt": "hello world",
+        }
+
+        payload = bench_v3.build_chat_request_payload(
+            config,
+            "demo-model",
+            {},
+            system_prompt_text="You are a strict technical reviewer.",
+        )
+
+        self.assertEqual(payload["messages"][0]["role"], "system")
+        self.assertEqual(payload["messages"][0]["content"], "You are a strict technical reviewer.")
+        self.assertEqual(payload["messages"][1], {"role": "user", "content": "hello world"})
 
     def test_save_raw_outputs_keeps_output_text_for_tools_runs(self):
         df = pd.DataFrame(
@@ -500,9 +520,12 @@ class StreamClassificationTests(unittest.TestCase):
             report_text = Path(report_path).read_text(encoding="utf-8")
 
         self.assertIn("Retained Sections", report_text)
-        self.assertIn("thinking, dialogue_output", report_text)
-        self.assertIn("<h4>thinking</h4>", report_text)
-        self.assertIn("<h4>dialogue_output</h4>", report_text)
+        self.assertIn("thinking / 思考內容", report_text)
+        self.assertIn("dialogue_output / 對話輸出", report_text)
+        self.assertIn("thinking", report_text)
+        self.assertIn("思考內容", report_text)
+        self.assertIn("dialogue_output", report_text)
+        self.assertIn("對話輸出", report_text)
 
 
 if __name__ == "__main__":

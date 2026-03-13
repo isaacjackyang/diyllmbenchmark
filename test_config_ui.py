@@ -140,6 +140,15 @@ class ConfigUiTests(unittest.TestCase):
         self.assertIn("Combination count: ERR", rendered_text)
         self.assertIn("Validation: 溫度 (Temperature): 無法解析數值：bad", rendered_text)
 
+    def test_parse_system_prompt_blocks_accepts_expected_count(self):
+        prompts = bench.parse_system_prompt_blocks("first prompt\n---\nsecond prompt", 2)
+
+        self.assertEqual(prompts, ["first prompt", "second prompt"])
+
+    def test_parse_system_prompt_blocks_rejects_wrong_count(self):
+        with self.assertRaises(ValueError):
+            bench.parse_system_prompt_blocks("only one prompt", 2)
+
 
 if __name__ == "__main__":
     unittest.main()

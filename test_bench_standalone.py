@@ -77,6 +77,8 @@ class BenchStandaloneTests(unittest.TestCase):
         self.assertEqual(console_df.loc[0, "Output/Thinking Ratio"], "0.680")
 
     def test_tools_report_includes_success_stats_and_wrapped_headers(self):
+        from openpyxl import load_workbook
+
         df = pd.DataFrame(
             [
                 {
@@ -88,9 +90,11 @@ class BenchStandaloneTests(unittest.TestCase):
                     "Finish_Reason": "tool_calls",
                     "Backend": "ollama",
                     "Model": "model-a",
+                    "System_Prompt_Label": "SP1",
+                    "System_Prompt_Text": "Be terse.",
                     "Params": {"temperature": 0.1},
                     "Applied_Params": {"temperature": 0.1},
-                    "Config_Str": "{temperature=0.1}",
+                    "Config_Str": "{temperature=0.1} | system_prompt=SP1",
                     "TPS": None,
                     "Thinking_TPS": None,
                     "Output_TPS": None,
@@ -127,9 +131,11 @@ class BenchStandaloneTests(unittest.TestCase):
                     "Finish_Reason": "stop",
                     "Backend": "ollama",
                     "Model": "model-a",
+                    "System_Prompt_Label": "SP2",
+                    "System_Prompt_Text": "Be verbose.",
                     "Params": {"temperature": 0.8},
                     "Applied_Params": {"temperature": 0.8},
-                    "Config_Str": "{temperature=0.8}",
+                    "Config_Str": "{temperature=0.8} | system_prompt=SP2",
                     "TPS": 3.0,
                     "Thinking_TPS": 10.0,
                     "Output_TPS": 5.0,
@@ -166,9 +172,11 @@ class BenchStandaloneTests(unittest.TestCase):
                     "Finish_Reason": "tool_calls",
                     "Backend": "ollama",
                     "Model": "model-b",
+                    "System_Prompt_Label": "SP1",
+                    "System_Prompt_Text": "Be terse.",
                     "Params": {"temperature": 0.1},
                     "Applied_Params": {"temperature": 0.1},
-                    "Config_Str": "{temperature=0.1}",
+                    "Config_Str": "{temperature=0.1} | system_prompt=SP1",
                     "TPS": None,
                     "Thinking_TPS": None,
                     "Output_TPS": None,
@@ -205,28 +213,50 @@ class BenchStandaloneTests(unittest.TestCase):
             "models": ["model-a", "model-b"],
             "prompt": "tool prompt",
             "vram_monitoring": "nvidia-smi",
+            "system_prompts": ["Be terse.", "Be verbose."],
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            report_path = bench.save_markdown_report(df, config, str(Path(temp_dir) / "report"))
+            summary_excel_path = bench.save_summary_excel_workbook(
+                df, config, str(Path(temp_dir) / "report")
+            )
+            report_path = bench.save_markdown_report(
+                df,
+                config,
+                str(Path(temp_dir) / "report"),
+                summary_excel_path=summary_excel_path,
+            )
             report_text = Path(report_path).read_text(encoding="utf-8")
+            workbook = load_workbook(summary_excel_path)
+            self.assertTrue(Path(summary_excel_path).exists())
 
         self.assertEqual(Path(report_path).suffix, ".html")
+        self.assertEqual(Path(summary_excel_path).suffix, ".xlsx")
+        self.assertEqual(workbook.sheetnames, ["Summary", "Outcome Summary", "Tool Call Success"])
+        self.assertIn("Status", str(workbook["Summary"]["B1"].value))
+        self.assertIn("狀態", str(workbook["Summary"]["B1"].value))
         self.assertIn("<!DOCTYPE html>", report_text)
         self.assertIn("<table", report_text)
-        self.assertIn("<th>Total Output Time<br>(s)</th>", report_text)
-        self.assertIn("<h2>Test Matrix</h2>", report_text)
+        self.assertIn("Total Output Time", report_text)
+        self.assertIn("總輸出時間", report_text)
+        self.assertIn("Test Matrix", report_text)
+        self.assertIn("測試矩陣", report_text)
         self.assertIn('class="matrix-table"', report_text)
-        self.assertIn("<h2>Tool Call Success by Model</h2>", report_text)
-        self.assertIn("Tool Call Success<br>Count", report_text)
-        self.assertIn("Tool Call Success<br>Probability", report_text)
-        self.assertIn("Total Output<br>(chars)", report_text)
-        self.assertIn("Total Output Time<br>(s)", report_text)
-        self.assertIn("Thinking TPS<br>(char/s)", report_text)
-        self.assertIn("Output<br>Category", report_text)
+        self.assertIn("Tool Call Success by Model", report_text)
+        self.assertIn("各模型工具呼叫成功統計", report_text)
+        self.assertIn("Tool Call Success", report_text)
+        self.assertIn("Total Output", report_text)
+        self.assertIn("Thinking TPS", report_text)
+        self.assertIn("Output Category", report_text)
+        self.assertIn("System Prompt Variants", report_text)
+        self.assertIn("系統提示變體", report_text)
+        self.assertIn("Be terse.", report_text)
+        self.assertIn("Be verbose.", report_text)
         self.assertIn("model-a", report_text)
         self.assertIn("50.0%", report_text)
         self.assertIn("100.0%", report_text)
+        self.assertIn("Download Excel / 下載 Excel 摘要", report_text)
+        self.assertIn(Path(summary_excel_path).name, report_text)
 
     def test_export_best_config_writes_into_report_directory(self):
         df = pd.DataFrame(
@@ -292,10 +322,17 @@ class BenchStandaloneTests(unittest.TestCase):
             recorded["raw_outputs_path"] = path.resolve()
             return path
 
-        def fake_save_markdown_report(df, cfg, report_stem):
+        def fake_save_markdown_report(df, cfg, report_stem, summary_excel_path=None):
             path = Path(f"{report_stem}.html")
             path.write_text("<!DOCTYPE html>", encoding="utf-8")
             recorded["report_path"] = path.resolve()
+            recorded["summary_excel_arg"] = None if summary_excel_path is None else Path(summary_excel_path).resolve()
+            return path
+
+        def fake_save_summary_excel_workbook(df, cfg, report_stem):
+            path = Path(f"{report_stem}_summary.xlsx")
+            path.write_text("excel", encoding="utf-8")
+            recorded["summary_excel_path"] = path.resolve()
             return path
 
         def fake_plot_results(df, output_path, capability="chat"):
@@ -332,6 +369,10 @@ class BenchStandaloneTests(unittest.TestCase):
                     side_effect=fake_save_raw_outputs,
                 ), patch.object(
                     bench,
+                    "save_summary_excel_workbook",
+                    side_effect=fake_save_summary_excel_workbook,
+                ), patch.object(
+                    bench,
                     "save_markdown_report",
                     side_effect=fake_save_markdown_report,
                 ), patch.object(
@@ -351,6 +392,8 @@ class BenchStandaloneTests(unittest.TestCase):
             self.assertTrue(report_dir.is_dir())
             self.assertEqual(recorded["raw_outputs_path"].parent, report_dir)
             self.assertEqual(recorded["report_path"].parent, report_dir)
+            self.assertEqual(recorded["summary_excel_path"].parent, report_dir)
+            self.assertEqual(recorded["summary_excel_arg"], recorded["summary_excel_path"])
             self.assertEqual(recorded["chart_path"].parent, report_dir)
             self.assertEqual(recorded["best_config_output_dir"], report_dir)
             self.assertEqual(recorded["plot_capability"], "chat")
