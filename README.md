@@ -103,7 +103,9 @@ python ollama_expert_bench.py
 - `↑ / ↓`：移動參數列
 - `← / →` 或 `Tab`：切換 `State / Values` 欄位
 - `Space`：切換 `N/A` 與 `TEST`
-- 在 `Values` 欄位直接輸入數字、逗號、小數點、負號
+- 在 `Values` 欄位直接輸入測試值
+  - 數值參數可輸入數字、逗號、小數點、負號
+  - `Thinking / Reasoning` 可輸入 `enable,disable` 或 `true,false`
 - `Backspace`：刪除一個字元
 - `d`：恢復該參數預設值
 - `Enter` / `Ctrl+S`：確認設定並進入 review
@@ -136,6 +138,7 @@ python ollama_expert_bench.py
    - 可不選；不選時代表只比較模型預設值
 5. 各參數的測試值
    - 以逗號分隔，例如 `0.1, 0.8`
+   - `Thinking / Reasoning` 開關可輸入 `enable, disable`
 6. 測試 prompt
 7. `system prompt` 變體
    - 可選 `N/A`
@@ -192,12 +195,14 @@ python ollama_expert_bench.py
 | `top_p` | `ollama`, `llama.cpp` | 核心採樣，降低時通常更保守 |
 | `min_p` | `ollama`, `llama.cpp` | 過濾低機率 token |
 | `repeat_penalty` | `ollama`, `llama.cpp` | 降低重複輸出 |
+| `enable_thinking` | `ollama`, `llama.cpp` | 測試 thinking / reasoning 開關對輸出與速度的影響 |
 | `num_gpu` | `ollama` | GPU 卸載相關設定，常明顯影響速度 |
 
 參數群組如下：
 
 - `生成核心`：`temperature`、`num_ctx`、`num_predict`
 - `採樣與懲罰`：`top_p`、`min_p`、`repeat_penalty`
+- `Thinking / Reasoning`：`enable_thinking`
 - `硬體與部署`：`num_gpu`
 
 ## 後端設定差異
@@ -206,7 +211,8 @@ python ollama_expert_bench.py
 
 - 會固定使用 `http://localhost:11434/v1`
 - 會先嘗試自動列出本機模型
-- 參數會以 Ollama 對應名稱送進 `options`
+- 大多數參數會以 Ollama 對應名稱送進 `options`
+- `enable_thinking` 會改送成頂層 `think=true/false`
 - 若有成功結果，會額外輸出 `Ollama_Modelfile_Suggest`
 
 ### llama.cpp
@@ -215,6 +221,7 @@ python ollama_expert_bench.py
 - 預設 port 是 `8080`
 - 模型名稱只作為報告辨識用途，不會替你載入模型
 - `num_predict` 會映射為 `n_predict`
+- `enable_thinking` 會映射為 `chat_template_kwargs.enable_thinking=true/false`
 
 ## 產出檔案
 

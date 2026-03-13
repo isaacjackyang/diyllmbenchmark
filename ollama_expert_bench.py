@@ -122,11 +122,22 @@ PARAM_INFO = {
         "backends": ["ollama"],
         "backend_keys": {"ollama": "num_gpu"},
     },
+    "enable_thinking": {
+        "label": "Thinking / Reasoning 開關",
+        "range": "enable | disable",
+        "desc": "測試是否啟用模型的 thinking / reasoning 模式。Ollama 會送出 `think`，llama.cpp 會送入 `chat_template_kwargs.enable_thinking`。",
+        "default": "disable, enable",
+        "value_type": "boolean",
+        "backends": ["ollama", "llama.cpp"],
+        "backend_keys": {"ollama": "think", "llama.cpp": "enable_thinking"},
+        "request_targets": {"ollama": "body", "llama.cpp": "chat_template_kwargs"},
+    },
 }
 
 PARAM_GROUPS = {
     "🔥 生成核心": ["temperature", "num_ctx", "num_predict"],
     "⚖️ 採樣與懲罰": ["top_p", "min_p", "repeat_penalty"],
+    "🧠 Thinking / Reasoning": ["enable_thinking"],
     "🖥️ 硬體與部署": ["num_gpu"],
 }
 
@@ -186,11 +197,96 @@ def get_ollama_models():
         return []
 
 
-def parse_csv_values(raw_text):
+BOOLEAN_TRUE_ALIASES = {
+    "1",
+    "true",
+    "on",
+    "enable",
+    "enabled",
+    "yes",
+    "y",
+    "think",
+    "thinking",
+    "啟用",
+    "開啟",
+    "是",
+}
+
+BOOLEAN_FALSE_ALIASES = {
+    "0",
+    "false",
+    "off",
+    "disable",
+    "disabled",
+    "no",
+    "n",
+    "nothink",
+    "關閉",
+    "停用",
+    "否",
+}
+
+
+def get_param_value_type(param_key):
+    return PARAM_INFO.get(param_key, {}).get("value_type", "number")
+
+
+def parse_boolean_value(raw_value):
+    normalized = str(raw_value).strip().lower()
+    if normalized in BOOLEAN_TRUE_ALIASES:
+        return True
+    if normalized in BOOLEAN_FALSE_ALIASES:
+        return False
+    raise ValueError(
+        f"無法解析布林值：{raw_value}。請使用 enable/disable、true/false、on/off 或 1/0。"
+    )
+
+
+def format_param_value_for_display(param_key, value):
+    if get_param_value_type(param_key) == "boolean":
+        normalized_value = value
+        if isinstance(value, str):
+            normalized_value = parse_boolean_value(value)
+        return "enable" if bool(normalized_value) else "disable"
+    return str(value)
+
+
+def format_param_values_for_display(param_key, values):
+    return ", ".join(format_param_value_for_display(param_key, value) for value in values)
+
+
+def resolve_thinking_mode(value):
+    if value in (None, "", "N/A"):
+        return "default"
+    try:
+        return "enable" if parse_boolean_value(value) else "disable"
+    except ValueError:
+        return str(value)
+
+
+def get_thinking_mode_for_run(params):
+    if not isinstance(params, dict) or "enable_thinking" not in params:
+        return "default"
+    return resolve_thinking_mode(params.get("enable_thinking"))
+
+
+def get_param_request_target(param_key, backend):
+    info = PARAM_INFO.get(param_key, {})
+    request_targets = info.get("request_targets", {})
+    if backend in request_targets:
+        return request_targets[backend]
+    return "options" if backend == "ollama" else "body"
+
+
+def parse_csv_values(raw_text, param_key=None):
+    value_type = get_param_value_type(param_key)
     values = []
     for item in raw_text.split(","):
         item = item.strip()
         if not item:
+            continue
+        if value_type == "boolean":
+            values.append(parse_boolean_value(item))
             continue
         try:
             if "." in item or "e" in item.lower():
@@ -217,7 +313,7 @@ def ask_param_values(param_key):
         if raw_value is None:
             return None
         try:
-            return parse_csv_values(raw_value)
+            return parse_csv_values(raw_value, param_key=param_key)
         except ValueError as exc:
             print(f"⚠️ {exc} 請重新輸入。")
 
@@ -225,7 +321,9 @@ def ask_param_values(param_key):
 def format_param_dict(params):
     if not params:
         return "預設參數"
-    joined = ", ".join(f"{key}={value}" for key, value in params.items())
+    joined = ", ".join(
+        f"{key}={format_param_value_for_display(key, value)}" for key, value in params.items()
+    )
     return "{" + joined + "}"
 
 
@@ -236,6 +334,48 @@ def build_backend_options(backend, params):
         if backend_key:
             backend_options[backend_key] = value
     return backend_options
+
+
+def build_backend_extra_body(backend, params):
+    extra_body = {}
+    options = {}
+    chat_template_kwargs = {}
+
+    for key, value in params.items():
+        backend_key = PARAM_INFO[key]["backend_keys"].get(backend)
+        if not backend_key:
+            continue
+
+        request_target = get_param_request_target(key, backend)
+        if request_target == "options":
+            options[backend_key] = value
+        elif request_target == "chat_template_kwargs":
+            chat_template_kwargs[backend_key] = value
+        else:
+            extra_body[backend_key] = value
+
+    if backend == "ollama":
+        if options:
+            extra_body["options"] = options
+        return extra_body
+
+    if options:
+        extra_body.update(options)
+    if chat_template_kwargs:
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+    return extra_body
+
+
+def build_ollama_modelfile_params(params):
+    modelfile_params = {}
+    for key, value in params.items():
+        backend_key = PARAM_INFO[key]["backend_keys"].get("ollama")
+        if not backend_key:
+            continue
+        if get_param_request_target(key, "ollama") != "options":
+            continue
+        modelfile_params[backend_key] = value
+    return modelfile_params
 
 
 SYSTEM_PROMPT_BLOCK_SEPARATOR = "---"
@@ -707,6 +847,7 @@ def build_tool_call_success_summary_dataframe(df):
 def wrap_markdown_table_headers(df):
     header_map = {
         "System Prompt": "System Prompt<br>Variant",
+        "Thinking Mode": "Thinking Mode<br>State",
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
         "Total Output (chars)": "Total Output<br>(chars)",
@@ -857,9 +998,16 @@ def build_summary_dataframe(df):
         summary_columns.insert(2, "Capability")
     if "System_Prompt_Label" in df.columns:
         summary_columns.insert(summary_columns.index("Model") + 1, "System_Prompt_Label")
+    if "Thinking_Mode" in df.columns:
+        thinking_mode_insert_at = summary_columns.index("Model") + 1
+        if "System_Prompt_Label" in summary_columns:
+            thinking_mode_insert_at = summary_columns.index("System_Prompt_Label") + 1
+        summary_columns.insert(thinking_mode_insert_at, "Thinking_Mode")
 
     summary_df = summary_source[summary_columns].copy()
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
+    if "Thinking_Mode" in summary_df.columns:
+        summary_df["Thinking_Mode"] = summary_df["Thinking_Mode"].apply(resolve_thinking_mode)
     summary_df["TPS"] = summary_df["TPS"].apply(lambda value: format_numeric_value(value, 2))
     summary_df["Thinking_TPS"] = summary_df["Thinking_TPS"].apply(
         lambda value: format_numeric_value(value, 2)
@@ -897,6 +1045,7 @@ def build_summary_dataframe(df):
             "Capability": "Capability",
             "Output_Category": "Output Category",
             "System_Prompt_Label": "System Prompt",
+            "Thinking_Mode": "Thinking Mode",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
             "Output_Chars": "Total Output (chars)",
@@ -1082,6 +1231,12 @@ FINISH_REASON_BILINGUAL_MAP = {
     "length": bilingual_text("length", "長度上限"),
 }
 
+THINKING_MODE_BILINGUAL_MAP = {
+    "enable": bilingual_text("enable", "啟用"),
+    "disable": bilingual_text("disable", "停用"),
+    "default": bilingual_text("default", "依後端預設"),
+}
+
 REPORT_HEADER_BILINGUAL_MAP = {
     "Run": "Run<br>執行編號",
     "Status": "Status<br>狀態",
@@ -1089,6 +1244,7 @@ REPORT_HEADER_BILINGUAL_MAP = {
     "Output Category": "Output Category<br>輸出分類",
     "Model": "Model<br>模型",
     "System Prompt": "System Prompt<br>系統提示",
+    "Thinking Mode": "Thinking Mode<br>思考模式",
     "Finish Reason": "Finish Reason<br>結束原因",
     "Config": "Config<br>測試設定",
     "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
@@ -1133,6 +1289,11 @@ def localize_system_prompt_label(value):
     return bilingual_text(str(value), "系統提示變體")
 
 
+def localize_thinking_mode_value(value):
+    normalized = resolve_thinking_mode(value)
+    return THINKING_MODE_BILINGUAL_MAP.get(normalized, value)
+
+
 def localize_report_dataframe(df):
     localized_df = df.copy()
     if "Status" in localized_df.columns:
@@ -1150,6 +1311,10 @@ def localize_report_dataframe(df):
     if "System Prompt" in localized_df.columns:
         localized_df["System Prompt"] = localized_df["System Prompt"].apply(
             localize_system_prompt_label
+        )
+    if "Thinking Mode" in localized_df.columns:
+        localized_df["Thinking Mode"] = localized_df["Thinking Mode"].apply(
+            localize_thinking_mode_value
         )
     return localized_df.rename(columns=REPORT_HEADER_BILINGUAL_MAP)
 
@@ -2861,9 +3026,10 @@ def export_best_config(df, config, output_dir="."):
     modelfile_path = None
     if best_row["Backend"] == "ollama":
         modelfile_path = output_dir_path / "Ollama_Modelfile_Suggest"
+        modelfile_params = build_ollama_modelfile_params(best_row["Params"])
         with modelfile_path.open("w", encoding="utf-8") as file:
             file.write(f"FROM {best_row['Model']}\n")
-            for key, value in best_row["Applied_Params"].items():
+            for key, value in modelfile_params.items():
                 file.write(f"PARAMETER {key} {value}\n")
         print(f"Saved Ollama_Modelfile_Suggest: {modelfile_path}")
     else:
@@ -3469,6 +3635,7 @@ def build_result_row(
         "Model": model,
         "System_Prompt_Label": system_prompt_label,
         "System_Prompt_Text": system_prompt_text,
+        "Thinking_Mode": get_thinking_mode_for_run(param_set),
         "Params": param_set.copy(),
         "Applied_Params": applied_params.copy(),
         "Config_Str": display_params,
@@ -3537,12 +3704,9 @@ def run_bench(config):
                 )
 
                 request_kwargs = {}
-                if applied_params:
-                    request_kwargs["extra_body"] = (
-                        {"options": applied_params}
-                        if config["backend"] == "ollama"
-                        else applied_params
-                    )
+                extra_body = build_backend_extra_body(config["backend"], param_set)
+                if extra_body:
+                    request_kwargs["extra_body"] = extra_body
 
                 start_time = time.time()
                 first_event_time = None
@@ -3990,6 +4154,10 @@ th {
             (bilingual_text("Backend", "後端"), row["Backend"]),
             (bilingual_text("Model", "模型"), row["Model"]),
             (bilingual_text("System Prompt", "系統提示"), localize_system_prompt_label(row.get("System_Prompt_Label", "N/A"))),
+            (
+                bilingual_text("Thinking Mode", "思考模式"),
+                localize_thinking_mode_value(row.get("Thinking_Mode", "default")),
+            ),
             (bilingual_text("System Prompt Chars", "系統提示字數"), len(system_prompt_text)),
             (bilingual_text("Params", "參數"), params_json),
             (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
@@ -4086,7 +4254,7 @@ TABLE_COLUMNS = (
 )
 
 
-ALLOWED_VALUE_CHARS = set("0123456789,.-+eE")
+ALLOWED_VALUE_CHARS = set("0123456789,.-+eEabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_")
 
 
 @dataclass
@@ -4163,7 +4331,7 @@ def validate_param_rows(rows):
         if not row.supported or not row.enabled:
             continue
         try:
-            final_params[row.key] = parse_csv_values(row.raw_value)
+            final_params[row.key] = parse_csv_values(row.raw_value, param_key=row.key)
         except ValueError as exc:
             return None, index, f"{row.label}: {exc}"
     return final_params, None, None
@@ -4176,7 +4344,7 @@ def row_value_count(row):
         return "-"
 
     try:
-        return str(len(parse_csv_values(row.raw_value)))
+        return str(len(parse_csv_values(row.raw_value, param_key=row.key)))
     except ValueError:
         return "ERR"
 
@@ -4198,7 +4366,7 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
                 (
                     "class:subtitle",
                     "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
-                    "Type numbers in Values | Backspace deletes or goes back from State | "
+                    "Type values in Values (numbers or enable/disable) | Backspace deletes or goes back from State | "
                     "d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
                 ),
             ]
@@ -4283,7 +4451,7 @@ def edit_param_grid(backend, initial_params=None):
     for row in rows:
         if initial_params and row.key in initial_params:
             row.enabled = True
-            row.raw_value = ", ".join(str(value) for value in initial_params[row.key])
+            row.raw_value = format_param_values_for_display(row.key, initial_params[row.key])
     state = {
         "row_index": 0,
         "column_index": 0,

@@ -1,0 +1,28 @@
+{
+    "generated_at": "2026-03-13 16:29:58",
+    "backend": "ollama",
+    "capability": "tools",
+    "selection_metric": "first_event_s",
+    "model": "gpt-oss:20b",
+    "params": {
+        "temperature": 1.5
+    },
+    "applied_params": {
+        "temperature": 1.5
+    },
+    "status": "ok",
+    "output_category": "tool_call",
+    "finish_reason": "tool_calls",
+    "diagnosis": "Received tool_calls payload during the tool benchmark (finish_reason=tool_calls).",
+    "tps": 51.41,
+    "ttft": 0.352,
+    "first_event_s": 0.352,
+    "stream_duration_s": 1.13,
+    "vram_base_mib": 13923,
+    "vram_peak_mib": 13923,
+    "vram_delta_mib": 0,
+    "vram_detail": "GPU 0 NVIDIA GeForce RTX 3080 Laptop GPU: 13923 -> 13923 / 16384 MiB (+0 MiB)",
+    "efficiency_score_tps_per_gib_peak": 3.781,
+    "prompt": "Check today's weather in Taipei. If you support tools or function calling, call the `lookup_weather` tool first instead of answering directl.",
+    "system_prompts": []
+}
