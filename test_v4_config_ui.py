@@ -6,6 +6,7 @@ import pandas as pd
 
 
 MODULE_CANDIDATES = [
+    Path(__file__).with_name("ollama_expert_bench.py"),
     Path(__file__).with_name("ollama_expert_bench_V5.py"),
     Path(__file__).with_name("ollama_expert_bench_V4.py"),
 ]

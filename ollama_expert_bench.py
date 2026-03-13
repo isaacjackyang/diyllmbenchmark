@@ -967,7 +967,7 @@ def ensure_runtime_ready():
 
 
 def persist_crash_log(error_text):
-    crash_log_path = Path("ollama_expert_bench_V5_crash.log")
+    crash_log_path = Path("ollama_expert_bench_crash.log")
     crash_log_path.write_text(error_text, encoding="utf-8")
     return crash_log_path
 
@@ -980,7 +980,7 @@ def handle_fatal_error(exc):
     error_text = "\n".join(
         [
             "程式執行失敗。",
-            "建議用 PowerShell 或 CMD 執行 `python ollama_expert_bench_V5.py`，比較容易看到完整訊息。",
+            "建議用 PowerShell 或 CMD 執行 `python ollama_expert_bench.py`，比較容易看到完整訊息。",
             "",
             f"{type(exc).__name__}: {exc}",
             "",
@@ -1003,7 +1003,7 @@ def handle_fatal_error(exc):
                 "請改用 PowerShell / CMD 執行，或把 crash log 傳回來。",
             ]
         )
-        show_windows_error_dialog("ollama_expert_bench_V5 啟動失敗", dialog_message)
+        show_windows_error_dialog("ollama_expert_bench 啟動失敗", dialog_message)
 
 
 def select_models_and_url(backend):
@@ -3527,7 +3527,7 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
     fragments.extend(
         to_formatted_text(
             [
-                ("class:title", "LLM Benchmark V5 | Full-Page Parameter Grid\n"),
+                ("class:title", "LLM Benchmark | Full-Page Parameter Grid\n"),
                 (
                     "class:subtitle",
                     "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
@@ -3808,7 +3808,7 @@ def print_config_review(config):
     combo_count = estimate_combo_count(params) if params else 1
 
     print("\n" + "=" * 62)
-    print("V5 Config Review")
+    print("Config Review")
     print("=" * 62)
     print(f"- Backend: {config['backend']}")
     print(f"- Capability: {config['capability']}")
@@ -3849,7 +3849,7 @@ def build_console_summary_dataframe(results_df):
 
 def interactive_config():
     print("\n" + "=" * 62)
-    print("LLM Benchmark V5")
+    print("LLM Benchmark")
     print("=" * 62)
 
     backend = questionary.select(

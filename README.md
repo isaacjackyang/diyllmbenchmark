@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後執行上面的安裝指令，再執行：
 
 ```bash
-python ollama_expert_bench_V3.py
+python ollama_expert_bench.py
 ```
 
 ## 快速開始
@@ -67,22 +67,29 @@ python ollama_expert_bench_V3.py
 2. 執行 benchmark：
 
    ```bash
-   python ollama_expert_bench_V3.py
+   python ollama_expert_bench.py
    ```
 
 3. 依照互動式選單完成設定。
 
 這個工具目前是互動式操作，沒有命令列參數介面；所有設定都是在執行後逐步選擇。
 
-## V4 參數頁試作
+## 目前正式版
 
-如果你想試新版的整頁表格式參數設定頁，可以執行：
+目前正式入口檔案是：
 
 ```bash
-python ollama_expert_bench_V4.py
+python ollama_expert_bench.py
 ```
 
-V4 目前保留 V3 的 benchmark 核心，但把參數設定頁改成全螢幕 grid：
+這個單檔版本目前整合了：
+
+- 原 V4 的全頁表格式參數設定 UI
+- 原 V3 / V5 的 benchmark / 圖表 / Markdown report / JSONL raw outputs / best config 輸出
+- `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
+- `tools` 模式下各模型的 tool call 成功次數與成功率摘要
+
+互動式整頁 grid 的操作方式如下：
 
 - `↑ / ↓`：移動參數列
 - `← / →` 或 `Tab`：切換 `State / Values` 欄位
@@ -94,21 +101,6 @@ V4 目前保留 V3 的 benchmark 核心，但把參數設定頁改成全螢幕 g
 - `Esc`：取消
 
 這一頁會一次列出所有可調參數；若目前 backend 不支援，該列會顯示 `LOCK`。
-V4 的終端摘要與 `report.md` 也會一起顯示 `Thinking TPS`、`Output TPS` 和 `Output/Thinking Ratio`。
-
-## V5 單檔完整版
-
-如果你要一支單檔就能直接跑的完整版本，可以執行：
-
-```bash
-python ollama_expert_bench_V5.py
-```
-
-V5 目前整合了：
-
-- V4 的全頁表格式參數設定 UI
-- V3 最後版本的 benchmark / 圖表 / Markdown report / JSONL raw outputs / best config 輸出
-- `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
 
 ## 使用流程
 
@@ -218,6 +210,9 @@ Benchmark 完成後，會在專案目錄下看到以下檔案：
 - `best_config.json`
   - 本次 benchmark 選出的最佳配置
   - 若沒有成功結果，則不會產生
+- `ollama_expert_bench_crash.log`
+  - 只有程式啟動或執行失敗時才會出現
+  - 可用來排查搬機或環境差異造成的閃退問題
 - `Ollama_Modelfile_Suggest`
   - 僅在最佳結果來自 `Ollama` 時產生
 

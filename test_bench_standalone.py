@@ -4,17 +4,17 @@ import tempfile
 
 import pandas as pd
 
-import ollama_expert_bench_V5 as v5
+import ollama_expert_bench as bench
 
 
-class V5StandaloneTests(unittest.TestCase):
+class BenchStandaloneTests(unittest.TestCase):
     def test_build_param_rows_keeps_all_params_visible(self):
-        ollama_rows = v5.build_param_rows("ollama")
+        ollama_rows = bench.build_param_rows("ollama")
         ollama_row_by_key = {row.key: row for row in ollama_rows}
-        llama_rows = v5.build_param_rows("llama.cpp")
+        llama_rows = bench.build_param_rows("llama.cpp")
         llama_row_by_key = {row.key: row for row in llama_rows}
 
-        self.assertEqual(set(ollama_row_by_key), set(v5.PARAM_INFO))
+        self.assertEqual(set(ollama_row_by_key), set(bench.PARAM_INFO))
         self.assertTrue(ollama_row_by_key["num_ctx"].supported)
         self.assertFalse(llama_row_by_key["num_ctx"].supported)
 
@@ -62,7 +62,7 @@ class V5StandaloneTests(unittest.TestCase):
             ]
         )
 
-        console_df = v5.build_console_summary_dataframe(df)
+        console_df = bench.build_console_summary_dataframe(df)
 
         self.assertIn("Thinking TPS (char/s)", console_df.columns)
         self.assertIn("Output TPS (char/s)", console_df.columns)
@@ -200,7 +200,7 @@ class V5StandaloneTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            report_path = v5.save_markdown_report(df, config, str(Path(temp_dir) / "report"))
+            report_path = bench.save_markdown_report(df, config, str(Path(temp_dir) / "report"))
             report_text = Path(report_path).read_text(encoding="utf-8")
 
         self.assertIn("## Tool Call Success by Model", report_text)

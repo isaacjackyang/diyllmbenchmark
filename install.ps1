@@ -104,4 +104,4 @@ if ($DryRun) {
 } else {
     Write-Host "Install complete."
 }
-Write-Host "Next step: run '$pythonCommand ollama_expert_bench_V3.py' from $projectRoot"
+Write-Host "Next step: run '$pythonCommand ollama_expert_bench.py' from $projectRoot"
