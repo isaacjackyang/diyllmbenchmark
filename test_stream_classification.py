@@ -28,10 +28,18 @@ def make_chunk(
     refusal=None,
     audio=None,
     extra_fields=None,
+    usage=None,
+    chunk_fields=None,
     choices=True,
 ):
+    top_level_fields = dict(chunk_fields or {})
+    if usage is not None:
+        top_level_fields["usage"] = (
+            SimpleNamespace(**usage) if isinstance(usage, dict) else usage
+        )
+
     if not choices:
-        return SimpleNamespace(choices=[])
+        return SimpleNamespace(choices=[], **top_level_fields)
 
     delta_fields = {}
     if content is not None:
@@ -51,7 +59,7 @@ def make_chunk(
 
     delta = SimpleNamespace(**delta_fields)
     choice = SimpleNamespace(delta=delta, finish_reason=finish_reason)
-    return SimpleNamespace(choices=[choice])
+    return SimpleNamespace(choices=[choice], **top_level_fields)
 
 
 def classify_chunks(chunks, error_message=None):
@@ -196,11 +204,35 @@ class StreamClassificationTests(unittest.TestCase):
         )
 
         self.assertEqual(result["Thinking_Chars"], 3)
+        self.assertEqual(result["Thinking_Tokens"], 1)
         self.assertEqual(result["Output_Chars"], 5)
+        self.assertEqual(result["Output_Tokens"], 1)
         self.assertEqual(result["Output_Time_s"], 0.2)
         self.assertEqual(result["Output_Thinking_Ratio"], 1.667)
-        self.assertEqual(result["Thinking_TPS"], 7.5)
-        self.assertEqual(result["Output_TPS"], 25.0)
+        self.assertEqual(result["Thinking_TPS"], 2.5)
+        self.assertEqual(result["Output_TPS"], 5.0)
+
+    def test_prefill_tps_uses_usage_chunk_without_choices(self):
+        result = classify_chunks(
+            [
+                make_chunk(role="assistant"),
+                make_chunk(content="hello", finish_reason="stop"),
+                make_chunk(
+                    choices=False,
+                    usage={"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
+                    chunk_fields={
+                        "prompt_eval_count": 20,
+                        "prompt_eval_duration": 2_000_000_000,
+                        "eval_count": 5,
+                        "eval_duration": 500_000_000,
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(result["Prompt_Tokens"], 20)
+        self.assertEqual(result["Prefill_Time_s"], 2.0)
+        self.assertEqual(result["Prefill_TPS"], 10.0)
 
     def test_summary_and_report_show_na_for_zero_output(self):
         df = pd.DataFrame(
@@ -245,10 +277,12 @@ class StreamClassificationTests(unittest.TestCase):
 
         summary_df = bench_v3.build_summary_dataframe(df)
         self.assertEqual(summary_df.loc[0, "TPS (chunk/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Prompt Tokens"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Prefill TPS (tok/s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Total Output (chars)"], 0)
         self.assertEqual(summary_df.loc[0, "Total Output Time (s)"], "N/A")
-        self.assertEqual(summary_df.loc[0, "Thinking TPS (char/s)"], "N/A")
-        self.assertEqual(summary_df.loc[0, "Output TPS (char/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Thinking TPS (tok/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Output TPS (tok/s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Output/Thinking Ratio"], "N/A")
         self.assertEqual(summary_df.loc[0, "TTFT (s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Output Category"], "empty_reply")
@@ -273,7 +307,7 @@ class StreamClassificationTests(unittest.TestCase):
         self.assertIn("empty_reply", report_text)
         self.assertIn("Diagnosis", report_text)
         self.assertIn("N/A chunk/s", report_text)
-        self.assertIn("N/A char/s", report_text)
+        self.assertIn("N/A tok/s", report_text)
         self.assertIn("Output/Thinking Ratio", report_text)
         self.assertIn("N/A s", report_text)
 

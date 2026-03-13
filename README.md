@@ -261,14 +261,18 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
 
 - `TPS (chunk/s)`
   - 以有文字內容的串流 chunk 估算吞吐量，適合做相對比較
+- `Prompt Tokens`
+  - 後端有提供時，顯示本次請求的 prompt token 數
+- `Prefill TPS (tok/s)`
+  - 預填充速度；優先使用 Ollama 的 `prompt_eval_duration`，否則回退為 `prompt_tokens / TTFT`
 - `Total Output (chars)`
   - 該次 run 最終保留的可見輸出總字數
 - `Total Output Time (s)`
   - 從收到第一段 output 到串流結束的時間
-- `Thinking TPS (char/s)`
-  - 以保留下來的 thinking 文字字數估算吞吐量
-- `Output TPS (char/s)`
-  - 以最終 dialogue output 字數估算吞吐量
+- `Thinking TPS (tok/s)`
+  - 以保留下來的 thinking 文字估算 token 吞吐量
+- `Output TPS (tok/s)`
+  - 以最終 dialogue output 估算 token 吞吐量
 - `Output/Thinking Ratio`
   - `output chars / thinking chars`，方便快速比較最終輸出相對於 thinking 的比例
 - `TTFT (s)`

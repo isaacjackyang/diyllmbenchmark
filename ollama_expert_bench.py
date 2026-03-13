@@ -415,6 +415,8 @@ def build_chat_request_payload(config, model, request_kwargs, system_prompt_text
         "stream": True,
         **request_kwargs,
     }
+    if config.get("backend") == "ollama":
+        payload["stream_options"] = {"include_usage": True}
     if capability == "tools":
         payload["tools"] = TOOL_BENCHMARK_TOOLS
         payload["tool_choice"] = "auto"
@@ -539,8 +541,69 @@ def calculate_efficiency_score(tps, vram_peak_mib):
     return round(score, 3)
 
 
-def calculate_text_tps(char_count, first_text_time, end_time):
-    if char_count is None or pd.isna(char_count) or char_count <= 0:
+TOKEN_ESTIMATE_PATTERN = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
+    r"|[A-Za-z0-9]+(?:['._:/-][A-Za-z0-9]+)*"
+    r"|[^\s]"
+)
+
+
+def estimate_token_count(text):
+    normalized_text = normalize_text_content(text)
+    if not normalized_text:
+        return 0
+    return len(TOKEN_ESTIMATE_PATTERN.findall(normalized_text))
+
+
+def parse_optional_int(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+
+
+def convert_ns_to_seconds(value):
+    numeric_value = parse_optional_int(value)
+    if numeric_value is None:
+        return None
+    if numeric_value <= 0:
+        return 0.0
+    return round(numeric_value / 1_000_000_000, 6)
+
+
+def calculate_duration_tps(unit_count, duration_seconds):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
+        return None
+    if duration_seconds is None or pd.isna(duration_seconds):
+        return None
+    if duration_seconds <= 0:
+        return 0.0
+    return round(unit_count / duration_seconds, 2)
+
+
+def calculate_text_tps(unit_count, first_text_time, end_time):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -548,11 +611,11 @@ def calculate_text_tps(char_count, first_text_time, end_time):
     generation_time = end_time - first_text_time
     if generation_time <= 0:
         return 0.0
-    return round(char_count / generation_time, 2)
+    return round(unit_count / generation_time, 2)
 
 
-def calculate_text_duration(char_count, first_text_time, end_time):
-    if char_count is None or pd.isna(char_count) or char_count <= 0:
+def calculate_text_duration(unit_count, first_text_time, end_time):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -589,24 +652,27 @@ def normalize_text_content(value):
     return str(value)
 
 
-def extract_delta_payload(delta):
-    if delta is None:
+def extract_object_payload(raw_object):
+    if raw_object is None:
         return {}
 
-    if isinstance(delta, dict):
-        raw_payload = delta
-    elif hasattr(delta, "model_dump"):
+    if isinstance(raw_object, dict):
+        raw_payload = raw_object
+    elif hasattr(raw_object, "model_dump"):
         try:
-            raw_payload = delta.model_dump(exclude_none=True)
+            raw_payload = raw_object.model_dump(exclude_none=True)
         except TypeError:
-            raw_payload = delta.model_dump()
-    elif hasattr(delta, "dict"):
+            raw_payload = raw_object.model_dump()
+    elif hasattr(raw_object, "dict"):
         try:
-            raw_payload = delta.dict(exclude_none=True)
+            raw_payload = raw_object.dict(exclude_none=True)
         except TypeError:
-            raw_payload = delta.dict()
+            raw_payload = raw_object.dict()
     else:
-        raw_payload = vars(delta)
+        try:
+            raw_payload = vars(raw_object)
+        except TypeError:
+            return {}
 
     payload = {}
     for key, value in raw_payload.items():
@@ -619,6 +685,39 @@ def extract_delta_payload(delta):
         payload[key] = value
 
     return payload
+
+
+def extract_delta_payload(delta):
+    return extract_object_payload(delta)
+
+
+def extract_stream_usage_metrics(chunk):
+    payload = extract_object_payload(chunk)
+    usage_payload = extract_object_payload(payload.get("usage") or getattr(chunk, "usage", None))
+
+    prompt_tokens = parse_optional_int(usage_payload.get("prompt_tokens"))
+    completion_tokens = parse_optional_int(usage_payload.get("completion_tokens"))
+    total_tokens = parse_optional_int(usage_payload.get("total_tokens"))
+    prompt_eval_count = parse_optional_int(payload.get("prompt_eval_count"))
+    eval_count = parse_optional_int(payload.get("eval_count"))
+
+    prompt_token_value = prompt_tokens if prompt_tokens is not None else prompt_eval_count
+    completion_token_value = completion_tokens if completion_tokens is not None else eval_count
+    total_token_value = total_tokens
+    if total_token_value is None and prompt_token_value is not None and completion_token_value is not None:
+        total_token_value = prompt_token_value + completion_token_value
+
+    return {
+        "prompt_tokens": prompt_token_value,
+        "completion_tokens": completion_token_value,
+        "total_tokens": total_token_value,
+        "prompt_eval_count": prompt_eval_count if prompt_eval_count is not None else prompt_token_value,
+        "eval_count": eval_count if eval_count is not None else completion_token_value,
+        "prompt_eval_duration_s": convert_ns_to_seconds(payload.get("prompt_eval_duration")),
+        "eval_duration_s": convert_ns_to_seconds(payload.get("eval_duration")),
+        "total_duration_s": convert_ns_to_seconds(payload.get("total_duration")),
+        "load_duration_s": convert_ns_to_seconds(payload.get("load_duration")),
+    }
 
 
 def normalize_non_content_type(field_name):
@@ -671,19 +770,27 @@ def classify_stream_result(
     finish_reason = None
     output_chars = 0
     thinking_chars = 0
+    output_tokens = 0
+    thinking_tokens = 0
+    usage_metrics = {}
 
     for record in chunk_records:
         if record["content"]:
             content_chunks += 1
             output_chars += len(record["content"])
+            output_tokens += record.get("content_tokens", estimate_token_count(record["content"]))
         if record.get("thinking"):
             thinking_chunks += 1
             thinking_chars += len(record["thinking"])
+            thinking_tokens += record.get("thinking_tokens", estimate_token_count(record["thinking"]))
         if record["non_content_types"]:
             non_content_chunks += 1
             non_content_types.update(record["non_content_types"])
         if record["finish_reason"]:
             finish_reason = record["finish_reason"]
+        for key, value in (record.get("usage_metrics") or {}).items():
+            if value is not None:
+                usage_metrics[key] = value
 
     first_event_seconds = round(first_event_time - start_time, 3) if first_event_time is not None else None
     stream_duration_seconds = round(end_time - start_time, 3)
@@ -731,6 +838,13 @@ def classify_stream_result(
         output_category = "early_stop"
         diagnosis = "Stream ended before any textual content or terminal finish_reason was received."
 
+    prompt_tokens = usage_metrics.get("prompt_tokens")
+    prefill_time_seconds = usage_metrics.get("prompt_eval_duration_s")
+    prefill_tps = calculate_duration_tps(prompt_tokens, prefill_time_seconds)
+    if prefill_tps is None and prompt_tokens is not None and ttft is not None:
+        prefill_time_seconds = ttft
+        prefill_tps = calculate_duration_tps(prompt_tokens, ttft)
+
     return {
         "Status": status,
         "Output_Category": output_category,
@@ -745,11 +859,16 @@ def classify_stream_result(
         "Stream_Duration_s": stream_duration_seconds,
         "TTFT": ttft,
         "TPS": tps,
+        "Prompt_Tokens": prompt_tokens,
+        "Prefill_Time_s": prefill_time_seconds,
+        "Prefill_TPS": prefill_tps,
         "Thinking_Chars": thinking_chars,
+        "Thinking_Tokens": thinking_tokens,
         "Output_Chars": output_chars,
+        "Output_Tokens": output_tokens,
         "Output_Time_s": calculate_text_duration(output_chars, first_content_time, end_time),
-        "Thinking_TPS": calculate_text_tps(thinking_chars, first_thinking_time, end_time),
-        "Output_TPS": calculate_text_tps(output_chars, first_content_time, end_time),
+        "Thinking_TPS": calculate_text_tps(thinking_tokens, first_thinking_time, end_time),
+        "Output_TPS": calculate_text_tps(output_tokens, first_content_time, end_time),
         "Output_Thinking_Ratio": calculate_output_thinking_ratio(output_chars, thinking_chars),
     }
 
@@ -783,6 +902,9 @@ def build_result_row(
         "TTFT": classification["TTFT"],
         "First_Event_s": classification["First_Event_s"],
         "Stream_Duration_s": classification["Stream_Duration_s"],
+        "Prompt_Tokens": classification.get("Prompt_Tokens"),
+        "Prefill_Time_s": classification.get("Prefill_Time_s"),
+        "Prefill_TPS": classification.get("Prefill_TPS"),
         "Total_Chunks": classification["Total_Chunks"],
         "Content_Chunks": classification["Content_Chunks"],
         "Non_Content_Chunks": classification["Non_Content_Chunks"],
@@ -850,11 +972,13 @@ def wrap_markdown_table_headers(df):
         "Thinking Mode": "Thinking Mode<br>State",
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
+        "Prompt Tokens": "Prompt<br>Tokens",
+        "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)",
         "Total Output (chars)": "Total Output<br>(chars)",
         "Total Output Time (s)": "Total Output Time<br>(s)",
         "TPS (chunk/s)": "TPS<br>(chunk/s)",
-        "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)",
-        "Output TPS (char/s)": "Output TPS<br>(char/s)",
+        "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)",
+        "Output TPS (tok/s)": "Output TPS<br>(tok/s)",
         "Output/Thinking Ratio": "Output/Thinking<br>Ratio",
         "TTFT (s)": "TTFT<br>(s)",
         "First Event (s)": "First Event<br>(s)",
@@ -965,6 +1089,8 @@ class NvidiaVRAMMonitor:
 def build_summary_dataframe(df):
     summary_source = df.copy()
     for column_name in (
+        "Prompt_Tokens",
+        "Prefill_TPS",
         "Output_Chars",
         "Output_Time_s",
         "Thinking_TPS",
@@ -981,6 +1107,8 @@ def build_summary_dataframe(df):
         "Model",
         "Finish_Reason",
         "Config_Str",
+        "Prompt_Tokens",
+        "Prefill_TPS",
         "Output_Chars",
         "Output_Time_s",
         "TPS",
@@ -1008,6 +1136,12 @@ def build_summary_dataframe(df):
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
     if "Thinking_Mode" in summary_df.columns:
         summary_df["Thinking_Mode"] = summary_df["Thinking_Mode"].apply(resolve_thinking_mode)
+    summary_df["Prompt_Tokens"] = summary_df["Prompt_Tokens"].apply(
+        lambda value: "N/A" if pd.isna(value) else int(value)
+    )
+    summary_df["Prefill_TPS"] = summary_df["Prefill_TPS"].apply(
+        lambda value: format_numeric_value(value, 2)
+    )
     summary_df["TPS"] = summary_df["TPS"].apply(lambda value: format_numeric_value(value, 2))
     summary_df["Thinking_TPS"] = summary_df["Thinking_TPS"].apply(
         lambda value: format_numeric_value(value, 2)
@@ -1048,11 +1182,13 @@ def build_summary_dataframe(df):
             "Thinking_Mode": "Thinking Mode",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
+            "Prompt_Tokens": "Prompt Tokens",
+            "Prefill_TPS": "Prefill TPS (tok/s)",
             "Output_Chars": "Total Output (chars)",
             "Output_Time_s": "Total Output Time (s)",
             "TPS": "TPS (chunk/s)",
-            "Thinking_TPS": "Thinking TPS (char/s)",
-            "Output_TPS": "Output TPS (char/s)",
+            "Thinking_TPS": "Thinking TPS (tok/s)",
+            "Output_TPS": "Output TPS (tok/s)",
             "Output_Thinking_Ratio": "Output/Thinking Ratio",
             "TTFT": "TTFT (s)",
             "First_Event_s": "First Event (s)",
@@ -1247,11 +1383,13 @@ REPORT_HEADER_BILINGUAL_MAP = {
     "Thinking Mode": "Thinking Mode<br>思考模式",
     "Finish Reason": "Finish Reason<br>結束原因",
     "Config": "Config<br>測試設定",
+    "Prompt Tokens": "Prompt Tokens<br>提示詞 Token 數",
+    "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)<br>預填充速率",
     "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
     "Total Output Time (s)": "Total Output Time<br>(s)<br>總輸出時間",
     "TPS (chunk/s)": "TPS<br>(chunk/s)<br>輸出速率",
-    "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)<br>思考速率",
-    "Output TPS (char/s)": "Output TPS<br>(char/s)<br>回覆速率",
+    "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)<br>思考速率",
+    "Output TPS (tok/s)": "Output TPS<br>(tok/s)<br>回覆速率",
     "Output/Thinking Ratio": "Output/Thinking<br>Ratio<br>輸出思考比",
     "TTFT (s)": "TTFT<br>(s)<br>首字延遲",
     "First Event (s)": "First Event<br>(s)<br>首事件延遲",
@@ -3580,6 +3718,9 @@ def inspect_stream_chunk(chunk):
         "thinking": "",
         "non_content_types": [],
         "finish_reason": None,
+        "content_tokens": 0,
+        "thinking_tokens": 0,
+        "usage_metrics": extract_stream_usage_metrics(chunk),
     }
 
     choices = getattr(chunk, "choices", None) or []
@@ -3596,6 +3737,8 @@ def inspect_stream_chunk(chunk):
         if reasoning_value is not None:
             reasoning_parts.append(normalize_reasoning_content(reasoning_value))
     chunk_info["thinking"] = "".join(reasoning_parts)
+    chunk_info["content_tokens"] = estimate_token_count(chunk_info["content"])
+    chunk_info["thinking_tokens"] = estimate_token_count(chunk_info["thinking"])
 
     chunk_info["non_content_types"] = sorted(
         {normalize_non_content_type(field_name) for field_name in delta_payload}
@@ -3658,10 +3801,16 @@ def build_result_row(
         "Output_Time_s": classification.get("Output_Time_s"),
         "Retained_Sections": retained_sections,
         "Thinking_Chars": thinking_chars,
+        "Thinking_Tokens": classification.get("Thinking_Tokens", estimate_token_count(thinking_text)),
         "Thinking_Text": thinking_text,
         "Dialogue_Output_Chars": output_chars,
+        "Dialogue_Output_Tokens": classification.get(
+            "Output_Tokens",
+            estimate_token_count(dialogue_output_text),
+        ),
         "Dialogue_Output_Text": dialogue_output_text,
         "Output_Chars": output_chars,
+        "Output_Tokens": classification.get("Output_Tokens", estimate_token_count(dialogue_output_text)),
         "Output_Text": dialogue_output_text,
         "Error": error_message or "",
     }
@@ -3867,10 +4016,12 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
     ]
     metric_notes = [
         "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks. / 以含文字的串流片段估算輸出速度。",
+        "`Prompt Tokens`: Prompt-side token count reported by the backend when available. / Prompt 端 token 數，優先使用後端回傳值。",
+        "`Prefill TPS (tok/s)`: Prompt token throughput. Uses Ollama prompt-eval timing when available; otherwise falls back to `prompt_tokens / TTFT`. / 預填充速度，優先使用 Ollama 的 prompt_eval_duration，否則回退為 `prompt_tokens / TTFT`。",
         "`Total Output (chars)`: Total visible dialogue output character count retained for the run. / 本次保留的可見回覆總字數。",
         "`Total Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
-        "`Thinking TPS (char/s)`: Estimated throughput of retained thinking text from the first thinking payload to stream end. / 從第一段 thinking 到結束的思考文字速率。",
-        "`Output TPS (char/s)`: Estimated throughput of final dialogue output text from the first output text chunk to stream end. / 從第一段輸出文字到結束的回覆速率。",
+        "`Thinking TPS (tok/s)`: Estimated retained-thinking token throughput from the first thinking payload to stream end. / 從第一段 thinking 到結束的思考 token 速率。",
+        "`Output TPS (tok/s)`: Estimated visible dialogue-output token throughput from the first output text chunk to stream end. / 從第一段輸出文字到結束的回覆 token 速率。",
         "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text. / 回覆字數除以 thinking 字數，越高代表可見答案佔比越高。",
         "`TTFT (s)`: Time to first text chunk. / 首段文字輸出的延遲。",
         "`First Event (s)`: Time to the first streamed event of any kind. / 第一個串流事件出現的延遲。",
@@ -4162,14 +4313,27 @@ th {
             (bilingual_text("Params", "參數"), params_json),
             (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
             (bilingual_text("Retained Sections", "保留區塊"), retained_sections_label),
+            (
+                bilingual_text("Prompt Tokens", "提示詞 Token 數"),
+                "N/A" if pd.isna(row.get("Prompt_Tokens")) else int(row.get("Prompt_Tokens")),
+            ),
             (bilingual_text("Thinking Chars", "思考字數"), int(row.get("Thinking_Chars", len(thinking_text)))),
+            (
+                bilingual_text("Thinking Tokens", "思考 Token 數"),
+                int(row.get("Thinking_Tokens", estimate_token_count(thinking_text))),
+            ),
             (
                 bilingual_text("Dialogue Output Chars", "對話輸出字數"),
                 int(row.get("Dialogue_Output_Chars", len(dialogue_output_text))),
             ),
+            (
+                bilingual_text("Dialogue Output Tokens", "對話輸出 Token 數"),
+                int(row.get("Dialogue_Output_Tokens", estimate_token_count(dialogue_output_text))),
+            ),
             (bilingual_text("TPS", "輸出速率"), f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
-            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
-            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
+            (bilingual_text("Prefill TPS", "預填充速率"), f"{format_numeric_value(row.get('Prefill_TPS'), 2)} tok/s"),
+            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} tok/s"),
+            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} tok/s"),
             (bilingual_text("Output/Thinking Ratio", "輸出思考比"), format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
             (bilingual_text("TTFT", "首字延遲"), f"{format_numeric_value(row['TTFT'], 3)} s"),
             (bilingual_text("First Event", "首事件時間"), f"{format_numeric_value(row['First_Event_s'], 3)} s"),
@@ -4955,9 +5119,11 @@ def build_console_summary_dataframe(results_df):
             "Output Category",
             "Finish Reason",
             "Model",
+            "Prompt Tokens",
+            "Prefill TPS (tok/s)",
             "TPS (chunk/s)",
-            "Thinking TPS (char/s)",
-            "Output TPS (char/s)",
+            "Thinking TPS (tok/s)",
+            "Output TPS (tok/s)",
             "Output/Thinking Ratio",
             "TTFT (s)",
             "First Event (s)",
