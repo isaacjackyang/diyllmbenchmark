@@ -197,6 +197,7 @@ class StreamClassificationTests(unittest.TestCase):
 
         self.assertEqual(result["Thinking_Chars"], 3)
         self.assertEqual(result["Output_Chars"], 5)
+        self.assertEqual(result["Output_Time_s"], 0.2)
         self.assertEqual(result["Output_Thinking_Ratio"], 1.667)
         self.assertEqual(result["Thinking_TPS"], 7.5)
         self.assertEqual(result["Output_TPS"], 25.0)
@@ -244,6 +245,8 @@ class StreamClassificationTests(unittest.TestCase):
 
         summary_df = bench_v3.build_summary_dataframe(df)
         self.assertEqual(summary_df.loc[0, "TPS (chunk/s)"], "N/A")
+        self.assertEqual(summary_df.loc[0, "Total Output (chars)"], 0)
+        self.assertEqual(summary_df.loc[0, "Total Output Time (s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Thinking TPS (char/s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Output TPS (char/s)"], "N/A")
         self.assertEqual(summary_df.loc[0, "Output/Thinking Ratio"], "N/A")
@@ -261,13 +264,16 @@ class StreamClassificationTests(unittest.TestCase):
             report_path = bench_v3.save_markdown_report(df, config, str(Path(temp_dir) / "report"))
             report_text = Path(report_path).read_text(encoding="utf-8")
 
-        self.assertIn("Output Category: empty_reply", report_text)
-        self.assertIn("Diagnosis:", report_text)
-        self.assertIn("TPS: N/A chunk/s", report_text)
-        self.assertIn("Thinking TPS: N/A char/s", report_text)
-        self.assertIn("Output TPS: N/A char/s", report_text)
-        self.assertIn("Output/Thinking Ratio: N/A", report_text)
-        self.assertIn("TTFT: N/A s", report_text)
+        self.assertEqual(Path(report_path).suffix, ".html")
+        self.assertIn("<h2>Test Matrix</h2>", report_text)
+        self.assertIn("<h2>Generated Outputs</h2>", report_text)
+        self.assertIn("Output Category", report_text)
+        self.assertIn("empty_reply", report_text)
+        self.assertIn("Diagnosis", report_text)
+        self.assertIn("N/A chunk/s", report_text)
+        self.assertIn("N/A char/s", report_text)
+        self.assertIn("Output/Thinking Ratio", report_text)
+        self.assertIn("N/A s", report_text)
 
     def test_filter_eligible_results_excludes_warning_and_error_rows(self):
         df = pd.DataFrame(
@@ -493,9 +499,10 @@ class StreamClassificationTests(unittest.TestCase):
             report_path = bench_v3.save_markdown_report(df, config, str(Path(temp_dir) / "report"))
             report_text = Path(report_path).read_text(encoding="utf-8")
 
-        self.assertIn("Retained Sections: thinking, dialogue_output", report_text)
-        self.assertIn("#### thinking", report_text)
-        self.assertIn("#### dialogue_output", report_text)
+        self.assertIn("Retained Sections", report_text)
+        self.assertIn("thinking, dialogue_output", report_text)
+        self.assertIn("<h4>thinking</h4>", report_text)
+        self.assertIn("<h4>dialogue_output</h4>", report_text)
 
 
 if __name__ == "__main__":

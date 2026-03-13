@@ -14,7 +14,7 @@
 - 支援兩種 benchmark 模式：
   - `chat`：一般文字回覆 benchmark
   - `tools`：檢查模型是否真的會輸出 `tool_calls`
-- 自動產生 Markdown 報告、PNG 圖表、JSONL 原始結果
+- 自動產生 HTML 報告、PNG 圖表、JSONL 原始結果
 - 若有 NVIDIA GPU 且系統可執行 `nvidia-smi`，會額外記錄 VRAM 使用量
 - 若後端有暴露 reasoning / thinking 類型欄位，會一併保留在報告中
 
@@ -198,23 +198,23 @@ python ollama_expert_bench.py
 
 ## 產出檔案
 
-Benchmark 完成後，會在專案目錄下看到以下檔案：
+Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 benchmark 產物集中放在裡面：
 
-- `bench_{backend}_{capability}_{timestamp}.md`
-  - 完整 Markdown 報告
-- `bench_{backend}_{capability}_{timestamp}.png`
+- `Report/bench_{backend}_{capability}_{timestamp}.html`
+  - 完整 HTML 報告
+- `Report/bench_{backend}_{capability}_{timestamp}.png`
   - 圖表輸出
   - 若沒有可繪圖的成功結果，可能不會產生
-- `bench_{backend}_{capability}_{timestamp}_outputs.jsonl`
+- `Report/bench_{backend}_{capability}_{timestamp}_outputs.jsonl`
   - 每次 run 的原始結果，適合後續再分析
-- `best_config.json`
+- `Report/best_config.json`
   - 本次 benchmark 選出的最佳配置
   - 若沒有成功結果，則不會產生
+- `Report/Ollama_Modelfile_Suggest`
+  - 僅在最佳結果來自 `Ollama` 時產生
 - `ollama_expert_bench_crash.log`
   - 只有程式啟動或執行失敗時才會出現
   - 可用來排查搬機或環境差異造成的閃退問題
-- `Ollama_Modelfile_Suggest`
-  - 僅在最佳結果來自 `Ollama` 時產生
 
 ## `best_config.json` 怎麼選
 
@@ -231,6 +231,10 @@ Benchmark 完成後，會在專案目錄下看到以下檔案：
 
 - `TPS (chunk/s)`
   - 以有文字內容的串流 chunk 估算吞吐量，適合做相對比較
+- `Total Output (chars)`
+  - 該次 run 最終保留的可見輸出總字數
+- `Total Output Time (s)`
+  - 從收到第一段 output 到串流結束的時間
 - `Thinking TPS (char/s)`
   - 以保留下來的 thinking 文字字數估算吞吐量
 - `Output TPS (char/s)`
@@ -274,7 +278,7 @@ Benchmark 完成後，會在專案目錄下看到以下檔案：
 
 這些內容會寫進：
 
-- Markdown 報告
+- HTML 報告
 - JSONL 原始輸出
 
 如果某次 run 沒有這些內容，報告中會標示為 `none` 或留空。

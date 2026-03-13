@@ -1,3 +1,4 @@
+import html
 import json
 import subprocess
 import sys
@@ -395,6 +396,18 @@ def calculate_text_tps(char_count, first_text_time, end_time):
     return round(char_count / generation_time, 2)
 
 
+def calculate_text_duration(char_count, first_text_time, end_time):
+    if char_count is None or pd.isna(char_count) or char_count <= 0:
+        return None
+    if first_text_time is None or end_time is None:
+        return None
+
+    generation_time = end_time - first_text_time
+    if generation_time <= 0:
+        return 0.0
+    return round(generation_time, 3)
+
+
 def calculate_output_thinking_ratio(output_chars, thinking_chars):
     if thinking_chars is None or pd.isna(thinking_chars) or thinking_chars <= 0:
         return None
@@ -579,6 +592,7 @@ def classify_stream_result(
         "TPS": tps,
         "Thinking_Chars": thinking_chars,
         "Output_Chars": output_chars,
+        "Output_Time_s": calculate_text_duration(output_chars, first_content_time, end_time),
         "Thinking_TPS": calculate_text_tps(thinking_chars, first_thinking_time, end_time),
         "Output_TPS": calculate_text_tps(output_chars, first_content_time, end_time),
         "Output_Thinking_Ratio": calculate_output_thinking_ratio(output_chars, thinking_chars),
@@ -679,6 +693,8 @@ def wrap_markdown_table_headers(df):
     header_map = {
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
+        "Total Output (chars)": "Total Output<br>(chars)",
+        "Total Output Time (s)": "Total Output Time<br>(s)",
         "TPS (chunk/s)": "TPS<br>(chunk/s)",
         "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)",
         "Output TPS (char/s)": "Output TPS<br>(char/s)",
@@ -791,7 +807,13 @@ class NvidiaVRAMMonitor:
 
 def build_summary_dataframe(df):
     summary_source = df.copy()
-    for column_name in ("Thinking_TPS", "Output_TPS", "Output_Thinking_Ratio"):
+    for column_name in (
+        "Output_Chars",
+        "Output_Time_s",
+        "Thinking_TPS",
+        "Output_TPS",
+        "Output_Thinking_Ratio",
+    ):
         if column_name not in summary_source.columns:
             summary_source[column_name] = None
 
@@ -802,6 +824,8 @@ def build_summary_dataframe(df):
         "Model",
         "Finish_Reason",
         "Config_Str",
+        "Output_Chars",
+        "Output_Time_s",
         "TPS",
         "Thinking_TPS",
         "Output_TPS",
@@ -828,6 +852,12 @@ def build_summary_dataframe(df):
     summary_df["Output_Thinking_Ratio"] = summary_df["Output_Thinking_Ratio"].apply(
         lambda value: format_numeric_value(value, 3)
     )
+    summary_df["Output_Chars"] = summary_df["Output_Chars"].apply(
+        lambda value: "N/A" if pd.isna(value) else int(value)
+    )
+    summary_df["Output_Time_s"] = summary_df["Output_Time_s"].apply(
+        lambda value: format_numeric_value(value, 3)
+    )
     summary_df["TTFT"] = summary_df["TTFT"].apply(lambda value: format_numeric_value(value, 3))
     summary_df["First_Event_s"] = summary_df["First_Event_s"].apply(
         lambda value: format_numeric_value(value, 3)
@@ -850,6 +880,8 @@ def build_summary_dataframe(df):
             "Output_Category": "Output Category",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
+            "Output_Chars": "Total Output (chars)",
+            "Output_Time_s": "Total Output Time (s)",
             "TPS": "TPS (chunk/s)",
             "Thinking_TPS": "Thinking TPS (char/s)",
             "Output_TPS": "Output TPS (char/s)",
@@ -869,6 +901,72 @@ def dataframe_to_text_table(df):
         return df.to_string(index=False)
 
 
+def dataframe_to_report_table(df):
+    try:
+        if any("<br>" in str(column_name) for column_name in df.columns):
+            return df.to_html(index=False, escape=False, border=0)
+        return df.to_markdown(index=False)
+    except Exception:
+        return df.to_string(index=False)
+
+
+def html_escape_text(value):
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except TypeError:
+        pass
+    if isinstance(value, (dict, list)):
+        value = json.dumps(value, ensure_ascii=False)
+    return html.escape(str(value))
+
+
+def html_escape_header(value):
+    return html.escape(str(value)).replace("&lt;br&gt;", "<br>")
+
+
+def dataframe_to_html_table(df, table_class="report-table", empty_message="No data"):
+    columns = [str(column_name) for column_name in getattr(df, "columns", [])]
+    parts = [f'<table class="{table_class}">', "<thead><tr>"]
+
+    if columns:
+        for column_name in columns:
+            parts.append(f"<th>{html_escape_header(column_name)}</th>")
+    else:
+        parts.append("<th>Value</th>")
+
+    parts.append("</tr></thead><tbody>")
+
+    if df is None or df.empty:
+        parts.append(
+            f'<tr><td class="empty-cell" colspan="{max(len(columns), 1)}">{html_escape_text(empty_message)}</td></tr>'
+        )
+    else:
+        for _, row in df.iterrows():
+            parts.append("<tr>")
+            for column_name in columns:
+                parts.append(f"<td>{html_escape_text(row[column_name])}</td>")
+            parts.append("</tr>")
+
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def key_value_rows_to_html_table(rows, table_class="kv-table"):
+    frame = pd.DataFrame(rows, columns=["Field", "Value"])
+    return dataframe_to_html_table(frame, table_class=table_class)
+
+
+def bullet_list_to_html(items, list_class="note-list"):
+    parts = [f'<ul class="{list_class}">']
+    for item in items:
+        parts.append(f"<li>{html_escape_text(item)}</li>")
+    parts.append("</ul>")
+    return "".join(parts)
+
+
 def serialize_result_value(value):
     if isinstance(value, (dict, list)):
         return value
@@ -879,6 +977,11 @@ def serialize_result_value(value):
             return None
     except TypeError:
         pass
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return value.item()
+        except (TypeError, ValueError):
+            pass
     return value
 
 
@@ -889,6 +992,12 @@ def save_raw_outputs(df, report_stem):
             payload = {column: serialize_result_value(value) for column, value in row.items()}
             file.write(json.dumps(payload, ensure_ascii=False) + "\n")
     return output_path
+
+
+def ensure_report_output_dir(base_dir="."):
+    report_dir = Path(base_dir) / "Report"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    return report_dir
 
 
 def select_plot_dataframe(df, capability="chat"):
@@ -1828,7 +1937,7 @@ def run_bench(config):
 
 
 def save_markdown_report(df, config, report_stem):
-    report_path = Path(f"{report_stem}.md")
+    report_path = Path(f"{report_stem}.html")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     wrapped_summary_df = wrap_markdown_table_headers(summary_df)
@@ -2357,7 +2466,7 @@ def run_bench(config):
 
 
 def save_markdown_report(df, config, report_stem):
-    report_path = Path(f"{report_stem}.md")
+    report_path = Path(f"{report_stem}.html")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
@@ -2462,7 +2571,7 @@ def select_best_result(eligible_df, capability):
     return best_row, "ttft"
 
 
-def export_best_config(df, config):
+def export_best_config(df, config, output_dir="."):
     capability = config.get("capability", "chat")
     eligible_df = filter_eligible_results(df, capability=capability)
     if eligible_df.empty:
@@ -2493,9 +2602,15 @@ def export_best_config(df, config):
         "efficiency_score_tps_per_gib_peak": best_row["Efficiency_Score"],
         "prompt": config["prompt"],
     }
+    serializable_payload = {
+        key: serialize_result_value(value) for key, value in payload.items()
+    }
 
-    with open("best_config.json", "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=4)
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+    best_config_path = output_dir_path / "best_config.json"
+    with best_config_path.open("w", encoding="utf-8") as file:
+        json.dump(serializable_payload, file, ensure_ascii=False, indent=4)
 
     print("\n" + "=" * 18)
     print(f"Best model: {best_row['Model']}")
@@ -2509,18 +2624,24 @@ def export_best_config(df, config):
     if pd.notna(best_row["Efficiency_Score"]):
         print(f"Efficiency score: {format_numeric_value(best_row['Efficiency_Score'], 3)} TPS/GiB Peak")
     print("=" * 18)
-    print("Saved best_config.json")
+    print(f"Saved best_config.json: {best_config_path}")
 
+    modelfile_path = None
     if best_row["Backend"] == "ollama":
-        with open("Ollama_Modelfile_Suggest", "w", encoding="utf-8") as file:
+        modelfile_path = output_dir_path / "Ollama_Modelfile_Suggest"
+        with modelfile_path.open("w", encoding="utf-8") as file:
             file.write(f"FROM {best_row['Model']}\n")
             for key, value in best_row["Applied_Params"].items():
                 file.write(f"PARAMETER {key} {value}\n")
-        print("Saved Ollama_Modelfile_Suggest")
+        print(f"Saved Ollama_Modelfile_Suggest: {modelfile_path}")
     else:
         print("Backend is not Ollama, so Modelfile output was skipped.")
 
-    return payload
+    return {
+        "payload": serializable_payload,
+        "best_config_path": best_config_path,
+        "modelfile_path": modelfile_path,
+    }
 
 
 def plot_results(df, output_path, capability="chat"):
@@ -2673,7 +2794,7 @@ def main():
 
 
 def save_markdown_report(df, config, report_stem):
-    report_path = Path(f"{report_stem}.md")
+    report_path = Path(f"{report_stem}.html")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
@@ -2718,12 +2839,12 @@ def save_markdown_report(df, config, report_stem):
         file.write("- `non_content_stream`: Stream only carried non-text payloads.\n")
         file.write("- `early_stop`: Stream ended before a complete reply or tool call was received.\n\n")
         file.write("## Summary\n\n")
-        file.write(dataframe_to_text_table(wrapped_summary_df))
+        file.write(dataframe_to_report_table(wrapped_summary_df))
         file.write("\n\n## Outcome Summary\n\n")
-        file.write(dataframe_to_text_table(wrapped_outcome_summary_df))
+        file.write(dataframe_to_report_table(wrapped_outcome_summary_df))
         if capability == "tools" and not tool_call_success_summary_df.empty:
             file.write("\n\n## Tool Call Success by Model\n\n")
-            file.write(dataframe_to_text_table(wrapped_tool_call_success_summary_df))
+            file.write(dataframe_to_report_table(wrapped_tool_call_success_summary_df))
         file.write("\n\n## Generated Outputs\n")
 
         for _, row in df.iterrows():
@@ -2779,7 +2900,8 @@ def main():
     warning_count = int((results_df["Status"] == "warning").sum())
     error_count = int((results_df["Status"] == "error").sum())
     capability = config.get("capability", "chat")
-    report_stem = f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
+    report_dir = ensure_report_output_dir()
+    report_stem = report_dir / f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     raw_outputs_path = save_raw_outputs(results_df, report_stem)
 
@@ -2818,10 +2940,12 @@ def main():
         print(f"Chart generation failed: {exc}")
 
     try:
-        export_best_config(results_df, config)
+        best_config_artifacts = export_best_config(results_df, config, output_dir=report_dir)
     except Exception as exc:
+        best_config_artifacts = None
         print(f"best_config export failed: {exc}")
 
+    print(f"\nSaved artifacts directory: {report_dir}")
     if report_path:
         print(f"\nSaved report: {report_path}")
     else:
@@ -2832,6 +2956,10 @@ def main():
         print(f"Saved chart: {chart_path}")
     else:
         print("Skipped chart output because there were no eligible successful results.")
+    if best_config_artifacts:
+        print(f"Saved best config: {best_config_artifacts['best_config_path']}")
+        if best_config_artifacts["modelfile_path"]:
+            print(f"Saved Modelfile suggestion: {best_config_artifacts['modelfile_path']}")
 
 
 def plot_results(df, output_path, capability="chat"):
@@ -3111,6 +3239,7 @@ def build_result_row(
         "Thinking_TPS": classification.get("Thinking_TPS"),
         "Output_TPS": classification.get("Output_TPS"),
         "Output_Thinking_Ratio": classification.get("Output_Thinking_Ratio"),
+        "Output_Time_s": classification.get("Output_Time_s"),
         "Retained_Sections": retained_sections,
         "Thinking_Chars": thinking_chars,
         "Thinking_Text": thinking_text,
@@ -3258,7 +3387,7 @@ def run_bench(config):
 
 
 def save_markdown_report(df, config, report_stem):
-    report_path = Path(f"{report_stem}.md")
+    report_path = Path(f"{report_stem}.html")
     summary_df = build_summary_dataframe(df)
     outcome_summary_df = build_outcome_summary_dataframe(df)
     capability = config.get("capability", "chat")
@@ -3269,127 +3398,308 @@ def save_markdown_report(df, config, report_stem):
     )
     wrapped_tool_call_success_summary_df = wrap_markdown_table_headers(tool_call_success_summary_df)
 
+    matrix_rows = [
+        ("Backend", config["backend"]),
+        ("Capability", capability),
+        ("Base URL", config.get("url", "N/A")),
+        ("Models", ", ".join(config.get("models", []))),
+        ("Prompt", config.get("prompt", "")),
+        ("Note", "TPS is estimated from streaming content chunks for relative comparison."),
+    ]
+    if capability == "tools":
+        matrix_rows.append(
+            (
+                "Tool Mode Note",
+                "Successful tool-calling runs may not emit text tokens, so `TPS` and `TTFT` can be `N/A`; "
+                "focus on `Output Category=tool_call` and `First Event (s)`.",
+            )
+        )
+
+    environment_notes = [f"VRAM monitoring: {config.get('vram_monitoring', 'unavailable')}"]
+    metric_notes = [
+        "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks.",
+        "`Total Output (chars)`: Total visible dialogue output character count retained for the run.",
+        "`Total Output Time (s)`: Time from the first output text chunk to stream end.",
+        "`Thinking TPS (char/s)`: Estimated throughput of retained thinking text from the first thinking payload to stream end.",
+        "`Output TPS (char/s)`: Estimated throughput of final dialogue output text from the first output text chunk to stream end.",
+        "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text.",
+        "`TTFT (s)`: Time to first text chunk.",
+        "`First Event (s)`: Time to the first streamed event of any kind.",
+        "`VRAM Peak (MiB)`: Highest observed total NVIDIA GPU memory usage during a run.",
+        "`Efficiency Score (TPS/GiB Peak)`: `TPS / (VRAM Peak in GiB)` when both values are available.",
+    ]
+    retained_text_notes = [
+        "`thinking`: Reasoning/thinking text captured from non-content reasoning payloads when the backend exposed them.",
+        "`dialogue_output`: Final conversational text emitted in normal content chunks.",
+        "If neither exists for a run, the retained sections list will be `none`.",
+    ]
+    output_diagnosis_notes = [
+        "`normal_content`: Received text output as expected for chat benchmarking.",
+        "`tool_call`: Received `tool_calls` payload as expected for tool benchmarking.",
+        "`text_reply_without_tool`: Returned text, but did not emit any tool call in tool mode.",
+        "`empty_reply`: Stream completed without text output.",
+        "`non_content_stream`: Stream only carried non-text payloads.",
+        "`early_stop`: Stream ended before a complete reply or tool call was received.",
+    ]
+
+    page_parts = [
+        "<!DOCTYPE html>",
+        '<html lang="en">',
+        "<head>",
+        '<meta charset="utf-8">',
+        '<meta name="viewport" content="width=device-width, initial-scale=1">',
+        "<title>Benchmark Report</title>",
+        """<style>
+body {
+    margin: 0;
+    background: #f4efe6;
+    color: #1f2933;
+    font-family: "Segoe UI", "Noto Sans TC", sans-serif;
+    line-height: 1.6;
+}
+.page {
+    max-width: 1500px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+}
+h1, h2, h3, h4 {
+    margin: 0;
+    color: #13212b;
+}
+h1 {
+    font-size: 2.1rem;
+    margin-bottom: 8px;
+}
+h2 {
+    font-size: 1.3rem;
+    margin-bottom: 14px;
+}
+h3 {
+    font-size: 1.05rem;
+    margin-bottom: 12px;
+}
+h4 {
+    font-size: 0.98rem;
+    margin: 14px 0 8px;
+}
+p {
+    margin: 0;
+}
+.lead {
+    color: #566370;
+    margin-bottom: 24px;
+}
+.section {
+    background: #fffdfa;
+    border: 1px solid #dccfbb;
+    border-radius: 18px;
+    padding: 22px 24px;
+    margin-top: 20px;
+    box-shadow: 0 10px 28px rgba(76, 61, 36, 0.06);
+}
+.table-wrap {
+    overflow-x: auto;
+}
+table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+}
+th,
+td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #e8dece;
+    text-align: left;
+    vertical-align: top;
+}
+th {
+    background: #f6efe2;
+    color: #263746;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.matrix-table th:first-child,
+.kv-table th:first-child,
+.kv-table td:first-child {
+    width: 220px;
+}
+.note-list {
+    margin: 0;
+    padding-left: 20px;
+}
+.note-list li + li {
+    margin-top: 8px;
+}
+.run-grid {
+    display: grid;
+    gap: 16px;
+}
+.run-card {
+    border: 1px solid #e5dac8;
+    border-radius: 16px;
+    padding: 18px;
+    background: #fff;
+}
+.text-block {
+    background: #17212b;
+    color: #f8f4ed;
+    padding: 16px;
+    border-radius: 14px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "Cascadia Code", "Consolas", monospace;
+    font-size: 0.92rem;
+}
+.empty-note {
+    color: #6f7c88;
+    font-style: italic;
+}
+.empty-cell {
+    color: #6f7c88;
+    text-align: center;
+}
+</style>""",
+        "</head>",
+        "<body>",
+        '<main class="page">',
+        "<h1>Benchmark Report</h1>",
+        '<p class="lead">Same benchmark content, rendered as HTML for clearer sections and more stable table layout.</p>',
+        '<section class="section">',
+        "<h2>Test Matrix</h2>",
+        '<div class="table-wrap">',
+        key_value_rows_to_html_table(matrix_rows, table_class="matrix-table"),
+        "</div>",
+        "</section>",
+        '<section class="section">',
+        "<h2>Environment Notes</h2>",
+        bullet_list_to_html(environment_notes),
+        "</section>",
+        '<section class="section">',
+        "<h2>Metric Notes</h2>",
+        bullet_list_to_html(metric_notes),
+        "</section>",
+        '<section class="section">',
+        "<h2>Retained Text Notes</h2>",
+        bullet_list_to_html(retained_text_notes),
+        "</section>",
+        '<section class="section">',
+        "<h2>Output Diagnosis Notes</h2>",
+        bullet_list_to_html(output_diagnosis_notes),
+        "</section>",
+        '<section class="section">',
+        "<h2>Summary</h2>",
+        '<div class="table-wrap">',
+        dataframe_to_html_table(wrapped_summary_df),
+        "</div>",
+        "</section>",
+        '<section class="section">',
+        "<h2>Outcome Summary</h2>",
+        '<div class="table-wrap">',
+        dataframe_to_html_table(wrapped_outcome_summary_df),
+        "</div>",
+        "</section>",
+    ]
+
+    if capability == "tools" and not tool_call_success_summary_df.empty:
+        page_parts.extend(
+            [
+                '<section class="section">',
+                "<h2>Tool Call Success by Model</h2>",
+                '<div class="table-wrap">',
+                dataframe_to_html_table(wrapped_tool_call_success_summary_df),
+                "</div>",
+                "</section>",
+            ]
+        )
+
+    page_parts.extend(
+        [
+            '<section class="section">',
+            "<h2>Generated Outputs</h2>",
+            '<div class="run-grid">',
+        ]
+    )
+
+    for _, row in df.iterrows():
+        params_json = json.dumps(row["Params"], ensure_ascii=False)
+        applied_params_json = json.dumps(row["Applied_Params"], ensure_ascii=False)
+        retained_sections = row.get("Retained_Sections", []) or []
+        retained_sections_label = ", ".join(retained_sections) if retained_sections else "none"
+        thinking_text = row.get("Thinking_Text", "")
+        dialogue_output_text = row.get("Dialogue_Output_Text", row.get("Output_Text", ""))
+
+        detail_rows = [
+            ("Status", row["Status"]),
+            ("Capability", row.get("Capability", capability)),
+            ("Output Category", row["Output_Category"]),
+            ("Diagnosis", row["Diagnosis"]),
+            ("Finish Reason", format_text_value(row["Finish_Reason"])),
+            ("Backend", row["Backend"]),
+            ("Model", row["Model"]),
+            ("Params", params_json),
+            ("Applied Params", applied_params_json),
+            ("Retained Sections", retained_sections_label),
+            ("Thinking Chars", int(row.get("Thinking_Chars", len(thinking_text)))),
+            ("Dialogue Output Chars", int(row.get("Dialogue_Output_Chars", len(dialogue_output_text)))),
+            ("TPS", f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
+            ("Thinking TPS", f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
+            ("Output TPS", f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
+            ("Output/Thinking Ratio", format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
+            ("TTFT", f"{format_numeric_value(row['TTFT'], 3)} s"),
+            ("First Event", f"{format_numeric_value(row['First_Event_s'], 3)} s"),
+            ("Stream Duration", f"{format_numeric_value(row['Stream_Duration_s'], 3)} s"),
+            ("Total Chunks", int(row["Total_Chunks"])),
+            ("Content Chunks", int(row["Content_Chunks"])),
+            ("Non-Content Chunks", int(row["Non_Content_Chunks"])),
+            ("Non-Content Types", row["Non_Content_Types"]),
+            ("VRAM Base", format_mib_value(row["VRAM_Base_MiB"])),
+            ("VRAM Peak", format_mib_value(row["VRAM_Peak_MiB"])),
+            ("VRAM Delta", format_mib_value(row["VRAM_Delta_MiB"])),
+            ("VRAM Detail", row["VRAM_Detail"]),
+            (
+                "Efficiency Score",
+                f"{format_numeric_value(row['Efficiency_Score'], 3)} TPS/GiB Peak",
+            ),
+        ]
+        if row["Error"]:
+            detail_rows.append(("Error", row["Error"]))
+
+        page_parts.extend(
+            [
+                '<article class="run-card">',
+                f"<h3>Run {html_escape_text(row['Run_ID'])}</h3>",
+                key_value_rows_to_html_table(detail_rows),
+            ]
+        )
+
+        if thinking_text:
+            page_parts.extend(
+                [
+                    "<h4>thinking</h4>",
+                    f'<pre class="text-block">{html_escape_text(normalize_output_text(thinking_text))}</pre>',
+                ]
+            )
+
+        if dialogue_output_text:
+            page_parts.extend(
+                [
+                    "<h4>dialogue_output</h4>",
+                    f'<pre class="text-block">{html_escape_text(normalize_output_text(dialogue_output_text))}</pre>',
+                ]
+            )
+
+        if not thinking_text and not dialogue_output_text:
+            page_parts.append(
+                '<p class="empty-note">No retained thinking or dialogue output text for this run.</p>'
+            )
+
+        page_parts.append("</article>")
+
+    page_parts.extend(["</div>", "</section>", "</main>", "</body>", "</html>"])
+
     with report_path.open("w", encoding="utf-8") as file:
-        file.write("# Benchmark Report\n\n")
-        file.write(f"- Backend: {config['backend']}\n")
-        file.write(f"- Capability: {capability}\n")
-        file.write(f"- Base URL: {config['url']}\n")
-        file.write(f"- Models: {', '.join(config['models'])}\n")
-        file.write(f"- Prompt: {config['prompt']}\n")
-        file.write("- Note: TPS is estimated from streaming content chunks for relative comparison.\n")
-        if capability == "tools":
-            file.write(
-                "- Tool mode note: successful tool-calling runs may not emit text tokens, "
-                "so `TPS` and `TTFT` can be `N/A`; focus on `Output Category=tool_call` "
-                "and `First Event (s)`.\n"
-            )
-        file.write("\n## Environment Notes\n\n")
-        file.write(f"- VRAM monitoring: {config.get('vram_monitoring', 'unavailable')}\n\n")
-        file.write("## Metric Notes\n\n")
-        file.write("- `TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks.\n")
-        file.write(
-            "- `Thinking TPS (char/s)`: Estimated throughput of retained thinking text "
-            "from the first thinking payload to stream end.\n"
-        )
-        file.write(
-            "- `Output TPS (char/s)`: Estimated throughput of final dialogue output text "
-            "from the first output text chunk to stream end.\n"
-        )
-        file.write(
-            "- `Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; "
-            "higher means more visible answer text per retained thinking text.\n"
-        )
-        file.write("- `TTFT (s)`: Time to first text chunk.\n")
-        file.write("- `First Event (s)`: Time to the first streamed event of any kind.\n")
-        file.write("- `VRAM Peak (MiB)`: Highest observed total NVIDIA GPU memory usage during a run.\n")
-        file.write(
-            "- `Efficiency Score (TPS/GiB Peak)`: `TPS / (VRAM Peak in GiB)` when both values are available.\n\n"
-        )
-        file.write("## Retained Text Notes\n\n")
-        file.write("- `thinking`: Reasoning/thinking text captured from non-content reasoning payloads when the backend exposed them.\n")
-        file.write("- `dialogue_output`: Final conversational text emitted in normal content chunks.\n")
-        file.write("- If neither exists for a run, the retained sections list will be `none`.\n\n")
-        file.write("## Output Diagnosis Notes\n\n")
-        file.write("- `normal_content`: Received text output as expected for chat benchmarking.\n")
-        file.write("- `tool_call`: Received `tool_calls` payload as expected for tool benchmarking.\n")
-        file.write("- `text_reply_without_tool`: Returned text, but did not emit any tool call in tool mode.\n")
-        file.write("- `empty_reply`: Stream completed without text output.\n")
-        file.write("- `non_content_stream`: Stream only carried non-text payloads.\n")
-        file.write("- `early_stop`: Stream ended before a complete reply or tool call was received.\n\n")
-        file.write("## Summary\n\n")
-        file.write(dataframe_to_text_table(wrapped_summary_df))
-        file.write("\n\n## Outcome Summary\n\n")
-        file.write(dataframe_to_text_table(wrapped_outcome_summary_df))
-        if capability == "tools" and not tool_call_success_summary_df.empty:
-            file.write("\n\n## Tool Call Success by Model\n\n")
-            file.write(dataframe_to_text_table(wrapped_tool_call_success_summary_df))
-        file.write("\n\n## Generated Outputs\n")
-
-        for _, row in df.iterrows():
-            params_json = json.dumps(row["Params"], ensure_ascii=False)
-            applied_params_json = json.dumps(row["Applied_Params"], ensure_ascii=False)
-            retained_sections = row.get("Retained_Sections", []) or []
-            retained_sections_label = ", ".join(retained_sections) if retained_sections else "none"
-            thinking_text = row.get("Thinking_Text", "")
-            dialogue_output_text = row.get("Dialogue_Output_Text", row.get("Output_Text", ""))
-
-            file.write(f"\n### Run {row['Run_ID']}\n\n")
-            file.write(f"- Status: {row['Status']}\n")
-            file.write(f"- Capability: {row.get('Capability', capability)}\n")
-            file.write(f"- Output Category: {row['Output_Category']}\n")
-            file.write(f"- Diagnosis: {row['Diagnosis']}\n")
-            file.write(f"- Finish Reason: {format_text_value(row['Finish_Reason'])}\n")
-            file.write(f"- Backend: {row['Backend']}\n")
-            file.write(f"- Model: {row['Model']}\n")
-            file.write(f"- Params: `{params_json}`\n")
-            file.write(f"- Applied Params: `{applied_params_json}`\n")
-            file.write(f"- Retained Sections: {retained_sections_label}\n")
-            file.write(f"- Thinking Chars: {int(row.get('Thinking_Chars', len(thinking_text)))}\n")
-            file.write(
-                f"- Dialogue Output Chars: "
-                f"{int(row.get('Dialogue_Output_Chars', len(dialogue_output_text)))}\n"
-            )
-            file.write(f"- TPS: {format_numeric_value(row['TPS'], 2)} chunk/s\n")
-            file.write(
-                f"- Thinking TPS: {format_numeric_value(row.get('Thinking_TPS'), 2)} char/s\n"
-            )
-            file.write(
-                f"- Output TPS: {format_numeric_value(row.get('Output_TPS'), 2)} char/s\n"
-            )
-            file.write(
-                f"- Output/Thinking Ratio: "
-                f"{format_numeric_value(row.get('Output_Thinking_Ratio'), 3)}\n"
-            )
-            file.write(f"- TTFT: {format_numeric_value(row['TTFT'], 3)} s\n")
-            file.write(f"- First Event: {format_numeric_value(row['First_Event_s'], 3)} s\n")
-            file.write(f"- Stream Duration: {format_numeric_value(row['Stream_Duration_s'], 3)} s\n")
-            file.write(f"- Total Chunks: {int(row['Total_Chunks'])}\n")
-            file.write(f"- Content Chunks: {int(row['Content_Chunks'])}\n")
-            file.write(f"- Non-Content Chunks: {int(row['Non_Content_Chunks'])}\n")
-            file.write(f"- Non-Content Types: {row['Non_Content_Types']}\n")
-            file.write(f"- VRAM Base: {format_mib_value(row['VRAM_Base_MiB'])}\n")
-            file.write(f"- VRAM Peak: {format_mib_value(row['VRAM_Peak_MiB'])}\n")
-            file.write(f"- VRAM Delta: {format_mib_value(row['VRAM_Delta_MiB'])}\n")
-            file.write(f"- VRAM Detail: {row['VRAM_Detail']}\n")
-            file.write(
-                f"- Efficiency Score: "
-                f"{format_numeric_value(row['Efficiency_Score'], 3)} TPS/GiB Peak\n"
-            )
-            if row["Error"]:
-                file.write(f"- Error: {row['Error']}\n")
-
-            if thinking_text:
-                file.write("\n#### thinking\n\n```text\n")
-                file.write(normalize_output_text(thinking_text))
-                file.write("\n```\n")
-
-            if dialogue_output_text:
-                file.write("\n#### dialogue_output\n\n```text\n")
-                file.write(normalize_output_text(dialogue_output_text))
-                file.write("\n```\n")
-
-            if not thinking_text and not dialogue_output_text:
-                file.write("\n_No retained thinking or dialogue output text for this run._\n")
+        file.write("\n".join(page_parts))
 
     return report_path
 
@@ -3924,7 +4234,8 @@ def main():
     warning_count = int((results_df["Status"] == "warning").sum())
     error_count = int((results_df["Status"] == "error").sum())
     capability = config.get("capability", "chat")
-    report_stem = f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
+    report_dir = ensure_report_output_dir()
+    report_stem = report_dir / f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
 
     raw_outputs_path = save_raw_outputs(results_df, report_stem)
 
@@ -3947,10 +4258,11 @@ def main():
         print(f"Chart generation failed: {exc}")
 
     try:
-        export_best_config(results_df, config)
+        export_best_config(results_df, config, output_dir=report_dir)
     except Exception as exc:
         print(f"best_config export failed: {exc}")
 
+    print(f"\nSaved artifacts directory: {report_dir}")
     if report_path:
         print(f"\nSaved report: {report_path}")
     else:
