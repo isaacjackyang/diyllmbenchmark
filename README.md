@@ -283,10 +283,10 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
   - 從收到第一段 output 到串流結束的時間
 - `Total Output Time (s)`
   - 從最早的 thinking 或 output 開始計時；若兩者都沒有，則退回第一個串流事件到串流結束
-- `Thinking TPS (char/s)`
-  - 以保留下來的 thinking 文字字數除以 `Thinking Time (s)` 估算吞吐量
-- `Output TPS (char/s)`
-  - 以最終 dialogue output 字數除以 `Output Time (s)` 估算吞吐量
+- `Thinking TPS (token/s)`
+  - 以保留下來的 thinking 文字估算 token 數，再除以 `Thinking Time (s)` 估算吞吐量
+- `Output TPS (token/s)`
+  - 以最終 dialogue output 估算 token 數，再除以 `Output Time (s)` 估算吞吐量
 - `Output/Thinking Ratio`
   - `output chars / thinking chars`，方便快速比較最終輸出相對於 thinking 的比例
 - `TTFT (s)`

@@ -551,14 +551,14 @@ def calculate_text_tps(char_count, first_text_time, end_time):
     return round(char_count / generation_time, 2)
 
 
-def calculate_tps_from_duration(char_count, duration_seconds):
-    if char_count is None or pd.isna(char_count) or char_count <= 0:
+def calculate_tps_from_duration(value_count, duration_seconds):
+    if value_count is None or pd.isna(value_count) or value_count <= 0:
         return None
     if duration_seconds is None:
         return None
     if duration_seconds <= 0:
         return 0.0
-    return round(char_count / duration_seconds, 2)
+    return round(value_count / duration_seconds, 2)
 
 
 def calculate_duration_seconds(start_time, end_time):
@@ -614,6 +614,30 @@ def normalize_text_content(value):
                 parts.append(str(item))
         return "".join(parts)
     return str(value)
+
+
+# Model-agnostic token estimate used for relative throughput comparisons.
+ESTIMATED_TOKEN_SEGMENT_PATTERN = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]|"
+    r"[A-Za-z0-9]+(?:[._:/+-][A-Za-z0-9]+)*|"
+    r"[^\s]",
+    re.UNICODE,
+)
+ASCII_TOKEN_RUN_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:[._:/+-][A-Za-z0-9]+)*$")
+
+
+def estimate_token_count(value):
+    text = normalize_text_content(value)
+    if not text:
+        return 0
+
+    token_count = 0
+    for segment in ESTIMATED_TOKEN_SEGMENT_PATTERN.findall(text):
+        if ASCII_TOKEN_RUN_PATTERN.fullmatch(segment):
+            token_count += max(1, (len(segment) + 4) // 5)
+        else:
+            token_count += 1
+    return token_count
 
 
 def extract_delta_payload(delta):
@@ -897,8 +921,8 @@ def wrap_markdown_table_headers(df):
         "Total Output (chars)": "Total Output<br>(chars)",
         "Total Output Time (s)": "Total Output Time<br>(s)",
         "TPS (chunk/s)": "TPS<br>(chunk/s)",
-        "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)",
-        "Output TPS (char/s)": "Output TPS<br>(char/s)",
+        "Thinking TPS (token/s)": "Thinking TPS<br>(token/s)",
+        "Output TPS (token/s)": "Output TPS<br>(token/s)",
         "Output/Thinking Ratio": "Output/Thinking<br>Ratio",
         "TTFT (s)": "TTFT<br>(s)",
         "First Event (s)": "First Event<br>(s)",
@@ -1107,8 +1131,8 @@ def build_summary_dataframe(df):
             "Output_Time_s": "Output Time (s)",
             "Total_Output_Time_s": "Total Output Time (s)",
             "TPS": "TPS (chunk/s)",
-            "Thinking_TPS": "Thinking TPS (char/s)",
-            "Output_TPS": "Output TPS (char/s)",
+            "Thinking_TPS": "Thinking TPS (token/s)",
+            "Output_TPS": "Output TPS (token/s)",
             "Output_Thinking_Ratio": "Output/Thinking Ratio",
             "TTFT": "TTFT (s)",
             "First_Event_s": "First Event (s)",
@@ -1463,8 +1487,8 @@ REPORT_HEADER_BILINGUAL_MAP = {
     "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
     "Total Output Time (s)": "Total Output Time<br>(s)<br>總輸出時間",
     "TPS (chunk/s)": "TPS<br>(chunk/s)<br>輸出速率",
-    "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)<br>思考速率",
-    "Output TPS (char/s)": "Output TPS<br>(char/s)<br>回覆速率",
+    "Thinking TPS (token/s)": "Thinking TPS<br>(token/s)<br>思考速率",
+    "Output TPS (token/s)": "Output TPS<br>(token/s)<br>回覆速率",
     "Output/Thinking Ratio": "Output/Thinking<br>Ratio<br>輸出思考比",
     "TTFT (s)": "TTFT<br>(s)<br>首字延遲",
     "First Event (s)": "First Event<br>(s)<br>首事件延遲",
@@ -3844,6 +3868,10 @@ def build_result_row(
     retained_sections = build_retained_sections(thinking_text, dialogue_output_text)
     thinking_chars = classification.get("Thinking_Chars", len(thinking_text))
     output_chars = classification.get("Output_Chars", len(dialogue_output_text))
+    thinking_tokens = estimate_token_count(thinking_text)
+    output_tokens = estimate_token_count(dialogue_output_text)
+    thinking_tps = calculate_tps_from_duration(thinking_tokens, classification.get("Thinking_Time_s"))
+    output_tps = calculate_tps_from_duration(output_tokens, classification.get("Output_Time_s"))
     return {
         "Run_ID": run_id,
         "Status": classification["Status"],
@@ -3873,17 +3901,20 @@ def build_result_row(
         "VRAM_Detail": vram_metrics["VRAM_Detail"],
         "Efficiency_Score": efficiency_score,
         "Thinking_Time_s": classification.get("Thinking_Time_s"),
-        "Thinking_TPS": classification.get("Thinking_TPS"),
+        "Thinking_TPS": thinking_tps,
         "Output_Time_s": classification.get("Output_Time_s"),
-        "Output_TPS": classification.get("Output_TPS"),
+        "Output_TPS": output_tps,
         "Output_Thinking_Ratio": classification.get("Output_Thinking_Ratio"),
         "Total_Output_Time_s": classification.get("Total_Output_Time_s"),
         "Retained_Sections": retained_sections,
         "Thinking_Chars": thinking_chars,
+        "Thinking_Tokens": thinking_tokens,
         "Thinking_Text": thinking_text,
         "Dialogue_Output_Chars": output_chars,
+        "Dialogue_Output_Tokens": output_tokens,
         "Dialogue_Output_Text": dialogue_output_text,
         "Output_Chars": output_chars,
+        "Output_Tokens": output_tokens,
         "Output_Text": dialogue_output_text,
         "Error": error_message or "",
     }
@@ -4068,8 +4099,8 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
         ),
         (
             bilingual_text("Note", "備註"),
-            "TPS is estimated from streaming content chunks for relative comparison. / "
-            "TPS 以帶文字內容的串流片段估算，適合做相對比較。",
+            "TPS is estimated from streaming content chunks, while Thinking TPS and Output TPS use estimated token counts from retained text. / "
+            "TPS 以帶文字內容的串流片段估算；Thinking TPS 與 Output TPS 則以保留文字的估算 token 數計算。",
         ),
     ]
     if capability == "tools":
@@ -4093,8 +4124,8 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
         "`Thinking Time (s)`: Time from the first thinking payload to the first output chunk, or to stream end if no output chunk arrived. / 從第一段 thinking 到第一段 output 的時間；若沒有 output，則到串流結束。",
         "`Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
         "`Total Output Time (s)`: Time from the earliest thinking/output payload, or first stream event fallback, to stream end. / 從最早的 thinking 或 output 開始計時；若兩者都沒有，則退回第一個串流事件到結束的時間。",
-        "`Thinking TPS (char/s)`: Retained thinking characters divided by `Thinking Time (s)`. / 保留的 thinking 字數除以 `Thinking Time (s)`。",
-        "`Output TPS (char/s)`: Final dialogue output characters divided by `Output Time (s)`. / 最終回覆字數除以 `Output Time (s)`。",
+        "`Thinking TPS (token/s)`: Estimated thinking tokens divided by `Thinking Time (s)`. / 估算的 thinking token 數除以 `Thinking Time (s)`。",
+        "`Output TPS (token/s)`: Estimated dialogue output tokens divided by `Output Time (s)`. / 估算的最終回覆 token 數除以 `Output Time (s)`。",
         "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text. / 回覆字數除以 thinking 字數，越高代表可見答案佔比越高。",
         "`TTFT (s)`: Time to first text chunk. / 首段文字輸出的延遲。",
         "`First Event (s)`: Time to the first streamed event of any kind. / 第一個串流事件出現的延遲。",
@@ -4484,9 +4515,14 @@ th {
             (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
             (bilingual_text("Retained Sections", "保留區塊"), retained_sections_label),
             (bilingual_text("Thinking Chars", "思考字數"), int(row.get("Thinking_Chars", len(thinking_text)))),
+            (bilingual_text("Thinking Tokens", "思考 token 數"), int(row.get("Thinking_Tokens", estimate_token_count(thinking_text)))),
             (
                 bilingual_text("Dialogue Output Chars", "對話輸出字數"),
                 int(row.get("Dialogue_Output_Chars", len(dialogue_output_text))),
+            ),
+            (
+                bilingual_text("Dialogue Output Tokens", "對話輸出 token 數"),
+                int(row.get("Dialogue_Output_Tokens", estimate_token_count(dialogue_output_text))),
             ),
             (bilingual_text("Thinking Time", "思考時間"), f"{format_numeric_value(row.get('Thinking_Time_s'), 3)} s"),
             (bilingual_text("Output Time", "回覆時間"), f"{format_numeric_value(row.get('Output_Time_s'), 3)} s"),
@@ -4495,8 +4531,8 @@ th {
                 f"{format_numeric_value(row.get('Total_Output_Time_s'), 3)} s",
             ),
             (bilingual_text("TPS", "輸出速率"), f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
-            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
-            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
+            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} token/s"),
+            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} token/s"),
             (bilingual_text("Output/Thinking Ratio", "輸出思考比"), format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
             (bilingual_text("TTFT", "首字延遲"), f"{format_numeric_value(row['TTFT'], 3)} s"),
             (bilingual_text("First Event", "首事件時間"), f"{format_numeric_value(row['First_Event_s'], 3)} s"),
@@ -5293,8 +5329,8 @@ def build_console_summary_dataframe(results_df):
             "Finish Reason",
             "Model",
             "TPS (chunk/s)",
-            "Thinking TPS (char/s)",
-            "Output TPS (char/s)",
+            "Thinking TPS (token/s)",
+            "Output TPS (token/s)",
             "Output/Thinking Ratio",
             "TTFT (s)",
             "First Event (s)",
