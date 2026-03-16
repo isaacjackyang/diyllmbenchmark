@@ -1,2 +1,0 @@
-FROM gpt-oss:20b
-PARAMETER temperature 1.5

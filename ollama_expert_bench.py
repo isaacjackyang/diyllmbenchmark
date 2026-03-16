@@ -415,8 +415,6 @@ def build_chat_request_payload(config, model, request_kwargs, system_prompt_text
         "stream": True,
         **request_kwargs,
     }
-    if config.get("backend") == "ollama":
-        payload["stream_options"] = {"include_usage": True}
     if capability == "tools":
         payload["tools"] = TOOL_BENCHMARK_TOOLS
         payload["tool_choice"] = "auto"
@@ -541,69 +539,8 @@ def calculate_efficiency_score(tps, vram_peak_mib):
     return round(score, 3)
 
 
-TOKEN_ESTIMATE_PATTERN = re.compile(
-    r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
-    r"|[A-Za-z0-9]+(?:['._:/-][A-Za-z0-9]+)*"
-    r"|[^\s]"
-)
-
-
-def estimate_token_count(text):
-    normalized_text = normalize_text_content(text)
-    if not normalized_text:
-        return 0
-    return len(TOKEN_ESTIMATE_PATTERN.findall(normalized_text))
-
-
-def parse_optional_int(value):
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-
-    text = str(value).strip()
-    if not text:
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        try:
-            return int(float(text))
-        except ValueError:
-            return None
-
-
-def convert_ns_to_seconds(value):
-    numeric_value = parse_optional_int(value)
-    if numeric_value is None:
-        return None
-    if numeric_value <= 0:
-        return 0.0
-    return round(numeric_value / 1_000_000_000, 6)
-
-
-def calculate_duration_tps(unit_count, duration_seconds):
-    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
-        return None
-    if duration_seconds is None or pd.isna(duration_seconds):
-        return None
-    if duration_seconds <= 0:
-        return 0.0
-    return round(unit_count / duration_seconds, 2)
-
-
-def calculate_text_tps(unit_count, first_text_time, end_time):
-    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
+def calculate_text_tps(char_count, first_text_time, end_time):
+    if char_count is None or pd.isna(char_count) or char_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -611,11 +548,31 @@ def calculate_text_tps(unit_count, first_text_time, end_time):
     generation_time = end_time - first_text_time
     if generation_time <= 0:
         return 0.0
-    return round(unit_count / generation_time, 2)
+    return round(char_count / generation_time, 2)
 
 
-def calculate_text_duration(unit_count, first_text_time, end_time):
-    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
+def calculate_tps_from_duration(char_count, duration_seconds):
+    if char_count is None or pd.isna(char_count) or char_count <= 0:
+        return None
+    if duration_seconds is None:
+        return None
+    if duration_seconds <= 0:
+        return 0.0
+    return round(char_count / duration_seconds, 2)
+
+
+def calculate_duration_seconds(start_time, end_time):
+    if start_time is None or end_time is None:
+        return None
+
+    duration_seconds = end_time - start_time
+    if duration_seconds <= 0:
+        return 0.0
+    return round(duration_seconds, 3)
+
+
+def calculate_text_duration(char_count, first_text_time, end_time):
+    if char_count is None or pd.isna(char_count) or char_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -624,6 +581,13 @@ def calculate_text_duration(unit_count, first_text_time, end_time):
     if generation_time <= 0:
         return 0.0
     return round(generation_time, 3)
+
+
+def pick_earliest_time(*timestamps):
+    valid_timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
+    if not valid_timestamps:
+        return None
+    return min(valid_timestamps)
 
 
 def calculate_output_thinking_ratio(output_chars, thinking_chars):
@@ -652,27 +616,24 @@ def normalize_text_content(value):
     return str(value)
 
 
-def extract_object_payload(raw_object):
-    if raw_object is None:
+def extract_delta_payload(delta):
+    if delta is None:
         return {}
 
-    if isinstance(raw_object, dict):
-        raw_payload = raw_object
-    elif hasattr(raw_object, "model_dump"):
+    if isinstance(delta, dict):
+        raw_payload = delta
+    elif hasattr(delta, "model_dump"):
         try:
-            raw_payload = raw_object.model_dump(exclude_none=True)
+            raw_payload = delta.model_dump(exclude_none=True)
         except TypeError:
-            raw_payload = raw_object.model_dump()
-    elif hasattr(raw_object, "dict"):
+            raw_payload = delta.model_dump()
+    elif hasattr(delta, "dict"):
         try:
-            raw_payload = raw_object.dict(exclude_none=True)
+            raw_payload = delta.dict(exclude_none=True)
         except TypeError:
-            raw_payload = raw_object.dict()
+            raw_payload = delta.dict()
     else:
-        try:
-            raw_payload = vars(raw_object)
-        except TypeError:
-            return {}
+        raw_payload = vars(delta)
 
     payload = {}
     for key, value in raw_payload.items():
@@ -685,39 +646,6 @@ def extract_object_payload(raw_object):
         payload[key] = value
 
     return payload
-
-
-def extract_delta_payload(delta):
-    return extract_object_payload(delta)
-
-
-def extract_stream_usage_metrics(chunk):
-    payload = extract_object_payload(chunk)
-    usage_payload = extract_object_payload(payload.get("usage") or getattr(chunk, "usage", None))
-
-    prompt_tokens = parse_optional_int(usage_payload.get("prompt_tokens"))
-    completion_tokens = parse_optional_int(usage_payload.get("completion_tokens"))
-    total_tokens = parse_optional_int(usage_payload.get("total_tokens"))
-    prompt_eval_count = parse_optional_int(payload.get("prompt_eval_count"))
-    eval_count = parse_optional_int(payload.get("eval_count"))
-
-    prompt_token_value = prompt_tokens if prompt_tokens is not None else prompt_eval_count
-    completion_token_value = completion_tokens if completion_tokens is not None else eval_count
-    total_token_value = total_tokens
-    if total_token_value is None and prompt_token_value is not None and completion_token_value is not None:
-        total_token_value = prompt_token_value + completion_token_value
-
-    return {
-        "prompt_tokens": prompt_token_value,
-        "completion_tokens": completion_token_value,
-        "total_tokens": total_token_value,
-        "prompt_eval_count": prompt_eval_count if prompt_eval_count is not None else prompt_token_value,
-        "eval_count": eval_count if eval_count is not None else completion_token_value,
-        "prompt_eval_duration_s": convert_ns_to_seconds(payload.get("prompt_eval_duration")),
-        "eval_duration_s": convert_ns_to_seconds(payload.get("eval_duration")),
-        "total_duration_s": convert_ns_to_seconds(payload.get("total_duration")),
-        "load_duration_s": convert_ns_to_seconds(payload.get("load_duration")),
-    }
 
 
 def normalize_non_content_type(field_name):
@@ -770,30 +698,35 @@ def classify_stream_result(
     finish_reason = None
     output_chars = 0
     thinking_chars = 0
-    output_tokens = 0
-    thinking_tokens = 0
-    usage_metrics = {}
 
     for record in chunk_records:
         if record["content"]:
             content_chunks += 1
             output_chars += len(record["content"])
-            output_tokens += record.get("content_tokens", estimate_token_count(record["content"]))
         if record.get("thinking"):
             thinking_chunks += 1
             thinking_chars += len(record["thinking"])
-            thinking_tokens += record.get("thinking_tokens", estimate_token_count(record["thinking"]))
         if record["non_content_types"]:
             non_content_chunks += 1
             non_content_types.update(record["non_content_types"])
         if record["finish_reason"]:
             finish_reason = record["finish_reason"]
-        for key, value in (record.get("usage_metrics") or {}).items():
-            if value is not None:
-                usage_metrics[key] = value
 
     first_event_seconds = round(first_event_time - start_time, 3) if first_event_time is not None else None
     stream_duration_seconds = round(end_time - start_time, 3)
+    thinking_phase_end_time = (
+        first_content_time
+        if first_thinking_time is not None
+        and first_content_time is not None
+        and first_content_time >= first_thinking_time
+        else end_time
+    )
+    thinking_time_s = calculate_duration_seconds(first_thinking_time, thinking_phase_end_time)
+    output_time_s = calculate_duration_seconds(first_content_time, end_time)
+    total_output_time_s = calculate_duration_seconds(
+        pick_earliest_time(first_thinking_time, first_content_time, first_event_time),
+        end_time,
+    )
 
     if content_chunks > 0 and first_content_time is not None:
         ttft = round(first_content_time - start_time, 3)
@@ -838,13 +771,6 @@ def classify_stream_result(
         output_category = "early_stop"
         diagnosis = "Stream ended before any textual content or terminal finish_reason was received."
 
-    prompt_tokens = usage_metrics.get("prompt_tokens")
-    prefill_time_seconds = usage_metrics.get("prompt_eval_duration_s")
-    prefill_tps = calculate_duration_tps(prompt_tokens, prefill_time_seconds)
-    if prefill_tps is None and prompt_tokens is not None and ttft is not None:
-        prefill_time_seconds = ttft
-        prefill_tps = calculate_duration_tps(prompt_tokens, ttft)
-
     return {
         "Status": status,
         "Output_Category": output_category,
@@ -859,16 +785,13 @@ def classify_stream_result(
         "Stream_Duration_s": stream_duration_seconds,
         "TTFT": ttft,
         "TPS": tps,
-        "Prompt_Tokens": prompt_tokens,
-        "Prefill_Time_s": prefill_time_seconds,
-        "Prefill_TPS": prefill_tps,
         "Thinking_Chars": thinking_chars,
-        "Thinking_Tokens": thinking_tokens,
         "Output_Chars": output_chars,
-        "Output_Tokens": output_tokens,
-        "Output_Time_s": calculate_text_duration(output_chars, first_content_time, end_time),
-        "Thinking_TPS": calculate_text_tps(thinking_tokens, first_thinking_time, end_time),
-        "Output_TPS": calculate_text_tps(output_tokens, first_content_time, end_time),
+        "Thinking_Time_s": thinking_time_s,
+        "Output_Time_s": output_time_s,
+        "Total_Output_Time_s": total_output_time_s,
+        "Thinking_TPS": calculate_tps_from_duration(thinking_chars, thinking_time_s),
+        "Output_TPS": calculate_tps_from_duration(output_chars, output_time_s),
         "Output_Thinking_Ratio": calculate_output_thinking_ratio(output_chars, thinking_chars),
     }
 
@@ -902,9 +825,6 @@ def build_result_row(
         "TTFT": classification["TTFT"],
         "First_Event_s": classification["First_Event_s"],
         "Stream_Duration_s": classification["Stream_Duration_s"],
-        "Prompt_Tokens": classification.get("Prompt_Tokens"),
-        "Prefill_Time_s": classification.get("Prefill_Time_s"),
-        "Prefill_TPS": classification.get("Prefill_TPS"),
         "Total_Chunks": classification["Total_Chunks"],
         "Content_Chunks": classification["Content_Chunks"],
         "Non_Content_Chunks": classification["Non_Content_Chunks"],
@@ -972,13 +892,13 @@ def wrap_markdown_table_headers(df):
         "Thinking Mode": "Thinking Mode<br>State",
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
-        "Prompt Tokens": "Prompt<br>Tokens",
-        "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)",
+        "Thinking Time (s)": "Thinking Time<br>(s)",
+        "Output Time (s)": "Output Time<br>(s)",
         "Total Output (chars)": "Total Output<br>(chars)",
         "Total Output Time (s)": "Total Output Time<br>(s)",
         "TPS (chunk/s)": "TPS<br>(chunk/s)",
-        "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)",
-        "Output TPS (tok/s)": "Output TPS<br>(tok/s)",
+        "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)",
+        "Output TPS (char/s)": "Output TPS<br>(char/s)",
         "Output/Thinking Ratio": "Output/Thinking<br>Ratio",
         "TTFT (s)": "TTFT<br>(s)",
         "First Event (s)": "First Event<br>(s)",
@@ -1089,10 +1009,10 @@ class NvidiaVRAMMonitor:
 def build_summary_dataframe(df):
     summary_source = df.copy()
     for column_name in (
-        "Prompt_Tokens",
-        "Prefill_TPS",
         "Output_Chars",
+        "Thinking_Time_s",
         "Output_Time_s",
+        "Total_Output_Time_s",
         "Thinking_TPS",
         "Output_TPS",
         "Output_Thinking_Ratio",
@@ -1107,10 +1027,10 @@ def build_summary_dataframe(df):
         "Model",
         "Finish_Reason",
         "Config_Str",
-        "Prompt_Tokens",
-        "Prefill_TPS",
         "Output_Chars",
+        "Thinking_Time_s",
         "Output_Time_s",
+        "Total_Output_Time_s",
         "TPS",
         "Thinking_TPS",
         "Output_TPS",
@@ -1136,12 +1056,6 @@ def build_summary_dataframe(df):
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
     if "Thinking_Mode" in summary_df.columns:
         summary_df["Thinking_Mode"] = summary_df["Thinking_Mode"].apply(resolve_thinking_mode)
-    summary_df["Prompt_Tokens"] = summary_df["Prompt_Tokens"].apply(
-        lambda value: "N/A" if pd.isna(value) else int(value)
-    )
-    summary_df["Prefill_TPS"] = summary_df["Prefill_TPS"].apply(
-        lambda value: format_numeric_value(value, 2)
-    )
     summary_df["TPS"] = summary_df["TPS"].apply(lambda value: format_numeric_value(value, 2))
     summary_df["Thinking_TPS"] = summary_df["Thinking_TPS"].apply(
         lambda value: format_numeric_value(value, 2)
@@ -1155,7 +1069,13 @@ def build_summary_dataframe(df):
     summary_df["Output_Chars"] = summary_df["Output_Chars"].apply(
         lambda value: "N/A" if pd.isna(value) else int(value)
     )
+    summary_df["Thinking_Time_s"] = summary_df["Thinking_Time_s"].apply(
+        lambda value: format_numeric_value(value, 3)
+    )
     summary_df["Output_Time_s"] = summary_df["Output_Time_s"].apply(
+        lambda value: format_numeric_value(value, 3)
+    )
+    summary_df["Total_Output_Time_s"] = summary_df["Total_Output_Time_s"].apply(
         lambda value: format_numeric_value(value, 3)
     )
     summary_df["TTFT"] = summary_df["TTFT"].apply(lambda value: format_numeric_value(value, 3))
@@ -1182,13 +1102,13 @@ def build_summary_dataframe(df):
             "Thinking_Mode": "Thinking Mode",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
-            "Prompt_Tokens": "Prompt Tokens",
-            "Prefill_TPS": "Prefill TPS (tok/s)",
             "Output_Chars": "Total Output (chars)",
-            "Output_Time_s": "Total Output Time (s)",
+            "Thinking_Time_s": "Thinking Time (s)",
+            "Output_Time_s": "Output Time (s)",
+            "Total_Output_Time_s": "Total Output Time (s)",
             "TPS": "TPS (chunk/s)",
-            "Thinking_TPS": "Thinking TPS (tok/s)",
-            "Output_TPS": "Output TPS (tok/s)",
+            "Thinking_TPS": "Thinking TPS (char/s)",
+            "Output_TPS": "Output TPS (char/s)",
             "Output_Thinking_Ratio": "Output/Thinking Ratio",
             "TTFT": "TTFT (s)",
             "First_Event_s": "First Event (s)",
@@ -1324,6 +1244,161 @@ def build_download_button(href, label):
     )
 
 
+def build_run_filter_panel_html():
+    filter_groups = [
+        (
+            bilingual_text("Tool Call", "工具呼叫"),
+            "tool-call",
+            [
+                ("yes", bilingual_text("Has tool call", "有呼叫 tool")),
+                ("no", bilingual_text("No tool call", "沒有呼叫 tool")),
+            ],
+        ),
+        (
+            bilingual_text("Thinking", "Thinking 內容"),
+            "thinking",
+            [
+                ("yes", bilingual_text("Has thinking", "有 thinking")),
+                ("no", bilingual_text("No thinking", "沒有 thinking")),
+            ],
+        ),
+        (
+            bilingual_text("Output", "輸出內容"),
+            "output",
+            [
+                ("yes", bilingual_text("Has output", "有 output")),
+                ("no", bilingual_text("No output", "沒有 output")),
+            ],
+        ),
+        (
+            bilingual_text("Thinking Mode", "思考模式"),
+            "thinking-mode",
+            [
+                ("enable", bilingual_text("Enable", "啟用")),
+                ("disable", bilingual_text("Disable", "停用")),
+                ("default", bilingual_text("Default", "預設")),
+            ],
+        ),
+        (
+            bilingual_text("Status", "狀態"),
+            "status",
+            [
+                ("ok", bilingual_text("ok", "正常")),
+                ("warning", bilingual_text("warning", "警告")),
+                ("error", bilingual_text("error", "錯誤")),
+            ],
+        ),
+    ]
+
+    parts = [
+        '<div class="filter-panel" id="run-filter-panel">',
+        '<div class="filter-toolbar">',
+        '<p class="filter-summary" id="run-filter-summary"></p>',
+        (
+            '<button type="button" class="filter-reset-button" id="run-filter-reset">'
+            'Reset Filters / 重設篩選</button>'
+        ),
+        "</div>",
+        '<div class="filter-groups">',
+    ]
+
+    for legend, group_name, options in filter_groups:
+        parts.append('<fieldset class="filter-group">')
+        parts.append(f"<legend>{legend}</legend>")
+        for value, label in options:
+            parts.append(
+                (
+                    '<label class="filter-option">'
+                    f'<input type="checkbox" class="run-filter-input" data-filter-group="{group_name}" '
+                    f'value="{value}" checked> '
+                    f"{label}</label>"
+                )
+            )
+        parts.append("</fieldset>")
+
+    parts.extend(
+        [
+            "</div>",
+            (
+                '<p class="empty-note" id="run-filter-empty" hidden>'
+                'No runs match the current filters. / 目前篩選條件下沒有符合的結果。</p>'
+            ),
+            "</div>",
+        ]
+    )
+    return "".join(parts)
+
+
+def build_run_filter_script():
+    return """<script>
+(() => {
+  const grid = document.getElementById('run-card-grid');
+  if (!grid) {
+    return;
+  }
+
+  const cards = Array.from(grid.querySelectorAll('.result-card'));
+  const inputs = Array.from(document.querySelectorAll('.run-filter-input'));
+  const summary = document.getElementById('run-filter-summary');
+  const emptyNote = document.getElementById('run-filter-empty');
+  const resetButton = document.getElementById('run-filter-reset');
+  const groups = ['tool-call', 'thinking', 'output', 'thinking-mode', 'status'];
+
+  function selectedValues(groupName) {
+    return new Set(
+      inputs
+        .filter((input) => input.dataset.filterGroup === groupName && input.checked)
+        .map((input) => input.value)
+    );
+  }
+
+  function applyFilters() {
+    const selectedByGroup = Object.fromEntries(
+      groups.map((groupName) => [groupName, selectedValues(groupName)])
+    );
+    let visibleCount = 0;
+
+    for (const card of cards) {
+      const matches = groups.every((groupName) => {
+        const selected = selectedByGroup[groupName];
+        if (selected.size === 0) {
+          return false;
+        }
+        return selected.has(card.getAttribute(`data-${groupName}`));
+      });
+
+      card.hidden = !matches;
+      if (matches) {
+        visibleCount += 1;
+      }
+    }
+
+    if (summary) {
+      summary.textContent = `${visibleCount} / ${cards.length} runs shown / 顯示 ${visibleCount} / ${cards.length} 筆`;
+    }
+    if (emptyNote) {
+      emptyNote.hidden = visibleCount !== 0;
+    }
+  }
+
+  for (const input of inputs) {
+    input.addEventListener('change', applyFilters);
+  }
+
+  if (resetButton) {
+    resetButton.addEventListener('click', () => {
+      for (const input of inputs) {
+        input.checked = true;
+      }
+      applyFilters();
+    });
+  }
+
+  applyFilters();
+})();
+</script>"""
+
+
 def key_value_rows_to_html_table(rows, table_class="kv-table"):
     frame = pd.DataFrame(rows, columns=["Field", "Value"])
     return dataframe_to_html_table(frame, table_class=table_class)
@@ -1383,13 +1458,13 @@ REPORT_HEADER_BILINGUAL_MAP = {
     "Thinking Mode": "Thinking Mode<br>思考模式",
     "Finish Reason": "Finish Reason<br>結束原因",
     "Config": "Config<br>測試設定",
-    "Prompt Tokens": "Prompt Tokens<br>提示詞 Token 數",
-    "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)<br>預填充速率",
+    "Thinking Time (s)": "Thinking Time<br>(s)<br>思考時間",
+    "Output Time (s)": "Output Time<br>(s)<br>回覆時間",
     "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
     "Total Output Time (s)": "Total Output Time<br>(s)<br>總輸出時間",
     "TPS (chunk/s)": "TPS<br>(chunk/s)<br>輸出速率",
-    "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)<br>思考速率",
-    "Output TPS (tok/s)": "Output TPS<br>(tok/s)<br>回覆速率",
+    "Thinking TPS (char/s)": "Thinking TPS<br>(char/s)<br>思考速率",
+    "Output TPS (char/s)": "Output TPS<br>(char/s)<br>回覆速率",
     "Output/Thinking Ratio": "Output/Thinking<br>Ratio<br>輸出思考比",
     "TTFT (s)": "TTFT<br>(s)<br>首字延遲",
     "First Event (s)": "First Event<br>(s)<br>首事件延遲",
@@ -1571,6 +1646,13 @@ def persist_crash_log(error_text):
     return crash_log_path
 
 
+def get_project_python_command_hint():
+    if sys.platform == "win32":
+        return r".\.venv\Scripts\python.exe ollama_expert_bench.py"
+
+    return "./.venv/bin/python ollama_expert_bench.py"
+
+
 def handle_fatal_error(exc):
     traceback_text = traceback.format_exc()
     if traceback_text.strip() == "NoneType: None":
@@ -1579,7 +1661,7 @@ def handle_fatal_error(exc):
     error_text = "\n".join(
         [
             "程式執行失敗。",
-            "建議用 PowerShell 或 CMD 執行 `python ollama_expert_bench.py`，比較容易看到完整訊息。",
+            f"建議在專案目錄用 `.venv` 內的 Python 執行，例如 `{get_project_python_command_hint()}`，比較容易看到完整訊息。",
             "",
             f"{type(exc).__name__}: {exc}",
             "",
@@ -3718,9 +3800,6 @@ def inspect_stream_chunk(chunk):
         "thinking": "",
         "non_content_types": [],
         "finish_reason": None,
-        "content_tokens": 0,
-        "thinking_tokens": 0,
-        "usage_metrics": extract_stream_usage_metrics(chunk),
     }
 
     choices = getattr(chunk, "choices", None) or []
@@ -3737,8 +3816,6 @@ def inspect_stream_chunk(chunk):
         if reasoning_value is not None:
             reasoning_parts.append(normalize_reasoning_content(reasoning_value))
     chunk_info["thinking"] = "".join(reasoning_parts)
-    chunk_info["content_tokens"] = estimate_token_count(chunk_info["content"])
-    chunk_info["thinking_tokens"] = estimate_token_count(chunk_info["thinking"])
 
     chunk_info["non_content_types"] = sorted(
         {normalize_non_content_type(field_name) for field_name in delta_payload}
@@ -3795,22 +3872,18 @@ def build_result_row(
         "VRAM_Delta_MiB": vram_metrics["VRAM_Delta_MiB"],
         "VRAM_Detail": vram_metrics["VRAM_Detail"],
         "Efficiency_Score": efficiency_score,
+        "Thinking_Time_s": classification.get("Thinking_Time_s"),
         "Thinking_TPS": classification.get("Thinking_TPS"),
+        "Output_Time_s": classification.get("Output_Time_s"),
         "Output_TPS": classification.get("Output_TPS"),
         "Output_Thinking_Ratio": classification.get("Output_Thinking_Ratio"),
-        "Output_Time_s": classification.get("Output_Time_s"),
+        "Total_Output_Time_s": classification.get("Total_Output_Time_s"),
         "Retained_Sections": retained_sections,
         "Thinking_Chars": thinking_chars,
-        "Thinking_Tokens": classification.get("Thinking_Tokens", estimate_token_count(thinking_text)),
         "Thinking_Text": thinking_text,
         "Dialogue_Output_Chars": output_chars,
-        "Dialogue_Output_Tokens": classification.get(
-            "Output_Tokens",
-            estimate_token_count(dialogue_output_text),
-        ),
         "Dialogue_Output_Text": dialogue_output_text,
         "Output_Chars": output_chars,
-        "Output_Tokens": classification.get("Output_Tokens", estimate_token_count(dialogue_output_text)),
         "Output_Text": dialogue_output_text,
         "Error": error_message or "",
     }
@@ -4016,12 +4089,12 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
     ]
     metric_notes = [
         "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks. / 以含文字的串流片段估算輸出速度。",
-        "`Prompt Tokens`: Prompt-side token count reported by the backend when available. / Prompt 端 token 數，優先使用後端回傳值。",
-        "`Prefill TPS (tok/s)`: Prompt token throughput. Uses Ollama prompt-eval timing when available; otherwise falls back to `prompt_tokens / TTFT`. / 預填充速度，優先使用 Ollama 的 prompt_eval_duration，否則回退為 `prompt_tokens / TTFT`。",
         "`Total Output (chars)`: Total visible dialogue output character count retained for the run. / 本次保留的可見回覆總字數。",
-        "`Total Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
-        "`Thinking TPS (tok/s)`: Estimated retained-thinking token throughput from the first thinking payload to stream end. / 從第一段 thinking 到結束的思考 token 速率。",
-        "`Output TPS (tok/s)`: Estimated visible dialogue-output token throughput from the first output text chunk to stream end. / 從第一段輸出文字到結束的回覆 token 速率。",
+        "`Thinking Time (s)`: Time from the first thinking payload to the first output chunk, or to stream end if no output chunk arrived. / 從第一段 thinking 到第一段 output 的時間；若沒有 output，則到串流結束。",
+        "`Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
+        "`Total Output Time (s)`: Time from the earliest thinking/output payload, or first stream event fallback, to stream end. / 從最早的 thinking 或 output 開始計時；若兩者都沒有，則退回第一個串流事件到結束的時間。",
+        "`Thinking TPS (char/s)`: Retained thinking characters divided by `Thinking Time (s)`. / 保留的 thinking 字數除以 `Thinking Time (s)`。",
+        "`Output TPS (char/s)`: Final dialogue output characters divided by `Output Time (s)`. / 最終回覆字數除以 `Output Time (s)`。",
         "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text. / 回覆字數除以 thinking 字數，越高代表可見答案佔比越高。",
         "`TTFT (s)`: Time to first text chunk. / 首段文字輸出的延遲。",
         "`First Event (s)`: Time to the first streamed event of any kind. / 第一個串流事件出現的延遲。",
@@ -4184,6 +4257,80 @@ th {
 .download-button:hover {
     background: #e4b45e;
 }
+.filter-panel {
+    border: 1px solid #e5dac8;
+    border-radius: 16px;
+    padding: 16px 18px;
+    background: #fff7eb;
+    margin-bottom: 18px;
+}
+.filter-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+.filter-summary {
+    color: #566370;
+    font-weight: 600;
+}
+.filter-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+}
+.filter-group {
+    margin: 0;
+    padding: 10px 12px 12px;
+    border: 1px solid #dccfbb;
+    border-radius: 14px;
+    min-width: 0;
+}
+.filter-group legend {
+    font-weight: 700;
+    color: #263746;
+    padding: 0 6px;
+}
+.filter-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    font-size: 0.95rem;
+}
+.filter-reset-button {
+    min-height: 36px;
+    padding: 0 12px;
+    border-radius: 999px;
+    border: 1px solid #c6a56a;
+    background: #fffdfa;
+    color: #263746;
+    font-weight: 700;
+    cursor: pointer;
+}
+.filter-reset-button:hover {
+    background: #f6efe2;
+}
+.run-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+.run-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    background: #f6efe2;
+    border: 1px solid #e5dac8;
+    color: #495866;
+    font-size: 0.88rem;
+    font-weight: 600;
+}
         </style>""",
         "</head>",
         "<body>",
@@ -4273,7 +4420,8 @@ th {
         [
             '<section class="section">',
             f"<h2>{bilingual_text('Generated Outputs', '各次執行輸出')}</h2>",
-            '<div class="run-grid">',
+            build_run_filter_panel_html(),
+            '<div class="run-grid" id="run-card-grid">',
         ]
     )
 
@@ -4295,6 +4443,28 @@ th {
         thinking_text = row.get("Thinking_Text", "")
         dialogue_output_text = row.get("Dialogue_Output_Text", row.get("Output_Text", ""))
         system_prompt_text = row.get("System_Prompt_Text", "")
+        thinking_mode = resolve_thinking_mode(row.get("Thinking_Mode", "default"))
+        has_tool_call = (
+            row.get("Output_Category") == "tool_call"
+            or "tool_calls" in parse_non_content_types(row.get("Non_Content_Types"))
+        )
+        has_thinking = bool((thinking_text or "").strip())
+        has_output = bool((dialogue_output_text or "").strip())
+        run_badges = [
+            bilingual_text("Tool Call", "工具呼叫")
+            + ": "
+            + bilingual_text("yes" if has_tool_call else "no", "有" if has_tool_call else "無"),
+            bilingual_text("Thinking", "Thinking 內容")
+            + ": "
+            + bilingual_text("yes" if has_thinking else "no", "有" if has_thinking else "無"),
+            bilingual_text("Output", "輸出內容")
+            + ": "
+            + bilingual_text("yes" if has_output else "no", "有" if has_output else "無"),
+            bilingual_text("thinking_mode", "思考模式")
+            + ": "
+            + localize_thinking_mode_value(thinking_mode),
+            bilingual_text("status", "狀態") + ": " + localize_status_value(row["Status"]),
+        ]
 
         detail_rows = [
             (bilingual_text("Status", "狀態"), localize_status_value(row["Status"])),
@@ -4313,27 +4483,20 @@ th {
             (bilingual_text("Params", "參數"), params_json),
             (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
             (bilingual_text("Retained Sections", "保留區塊"), retained_sections_label),
-            (
-                bilingual_text("Prompt Tokens", "提示詞 Token 數"),
-                "N/A" if pd.isna(row.get("Prompt_Tokens")) else int(row.get("Prompt_Tokens")),
-            ),
             (bilingual_text("Thinking Chars", "思考字數"), int(row.get("Thinking_Chars", len(thinking_text)))),
-            (
-                bilingual_text("Thinking Tokens", "思考 Token 數"),
-                int(row.get("Thinking_Tokens", estimate_token_count(thinking_text))),
-            ),
             (
                 bilingual_text("Dialogue Output Chars", "對話輸出字數"),
                 int(row.get("Dialogue_Output_Chars", len(dialogue_output_text))),
             ),
+            (bilingual_text("Thinking Time", "思考時間"), f"{format_numeric_value(row.get('Thinking_Time_s'), 3)} s"),
+            (bilingual_text("Output Time", "回覆時間"), f"{format_numeric_value(row.get('Output_Time_s'), 3)} s"),
             (
-                bilingual_text("Dialogue Output Tokens", "對話輸出 Token 數"),
-                int(row.get("Dialogue_Output_Tokens", estimate_token_count(dialogue_output_text))),
+                bilingual_text("Total Output Time", "總輸出時間"),
+                f"{format_numeric_value(row.get('Total_Output_Time_s'), 3)} s",
             ),
             (bilingual_text("TPS", "輸出速率"), f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
-            (bilingual_text("Prefill TPS", "預填充速率"), f"{format_numeric_value(row.get('Prefill_TPS'), 2)} tok/s"),
-            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} tok/s"),
-            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} tok/s"),
+            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} char/s"),
+            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} char/s"),
             (bilingual_text("Output/Thinking Ratio", "輸出思考比"), format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
             (bilingual_text("TTFT", "首字延遲"), f"{format_numeric_value(row['TTFT'], 3)} s"),
             (bilingual_text("First Event", "首事件時間"), f"{format_numeric_value(row['First_Event_s'], 3)} s"),
@@ -4356,8 +4519,18 @@ th {
 
         page_parts.extend(
             [
-                '<article class="run-card">',
+                (
+                    '<article class="run-card result-card" '
+                    f'data-tool-call="{"yes" if has_tool_call else "no"}" '
+                    f'data-thinking="{"yes" if has_thinking else "no"}" '
+                    f'data-output="{"yes" if has_output else "no"}" '
+                    f'data-thinking-mode="{thinking_mode}" '
+                    f'data-status="{row["Status"]}">'
+                ),
                 f"<h3>{bilingual_text('Run ' + str(row['Run_ID']), f'第 {row['Run_ID']} 次執行')}</h3>",
+                '<div class="run-badges">' + "".join(
+                    f'<span class="run-badge">{html_escape_text(badge)}</span>' for badge in run_badges
+                ) + "</div>",
                 key_value_rows_to_html_table(detail_rows),
             ]
         )
@@ -4385,7 +4558,7 @@ th {
 
         page_parts.append("</article>")
 
-    page_parts.extend(["</div>", "</section>", "</main>", "</body>", "</html>"])
+    page_parts.extend(["</div>", "</section>", build_run_filter_script(), "</main>", "</body>", "</html>"])
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("\n".join(page_parts))
@@ -5119,11 +5292,9 @@ def build_console_summary_dataframe(results_df):
             "Output Category",
             "Finish Reason",
             "Model",
-            "Prompt Tokens",
-            "Prefill TPS (tok/s)",
             "TPS (chunk/s)",
-            "Thinking TPS (tok/s)",
-            "Output TPS (tok/s)",
+            "Thinking TPS (char/s)",
+            "Output TPS (char/s)",
             "Output/Thinking Ratio",
             "TTFT (s)",
             "First Event (s)",

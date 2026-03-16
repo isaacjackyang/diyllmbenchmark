@@ -10,6 +10,7 @@ Set-StrictMode -Version Latest
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
 $entryScriptPath = Join-Path $projectRoot "ollama_expert_bench.py"
+$venvPath = Join-Path $projectRoot ".venv"
 $runtimeCheckCode = @'
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
@@ -52,13 +53,43 @@ function Resolve-PythonExe {
     throw "Python was not found. Install Python 3 first, then rerun this script."
 }
 
+function Get-VenvPythonPath {
+    param(
+        [string]$VirtualEnvPath
+    )
+
+    if ($env:OS -eq "Windows_NT") {
+        return Join-Path $VirtualEnvPath "Scripts\python.exe"
+    }
+
+    return Join-Path $VirtualEnvPath "bin/python"
+}
+
+function Get-VenvActivatePath {
+    param(
+        [string]$VirtualEnvPath
+    )
+
+    if ($env:OS -eq "Windows_NT") {
+        return Join-Path $VirtualEnvPath "Scripts\Activate.ps1"
+    }
+
+    return Join-Path $VirtualEnvPath "bin/activate"
+}
+
 function Format-Command {
     param(
         [string]$Command,
         [string[]]$Arguments
     )
 
-    $parts = @($Command) + ($Arguments | ForEach-Object {
+    $formattedCommand = if ($Command -match "\s") {
+        '"' + $Command + '"'
+    } else {
+        $Command
+    }
+
+    $parts = @($formattedCommand) + ($Arguments | ForEach-Object {
         if ($_ -match "\s") {
             '"' + $_ + '"'
         } else {
@@ -99,19 +130,40 @@ if (-not (Test-Path $entryScriptPath)) {
 }
 
 $pythonCommand = Resolve-PythonExe -RequestedPythonExe $PythonExe
+$venvPython = Get-VenvPythonPath -VirtualEnvPath $venvPath
+$venvActivatePath = Get-VenvActivatePath -VirtualEnvPath $venvPath
 
 Write-Host "Project root: $projectRoot"
 Write-Host "Requirements file: $requirementsPath"
 Write-Host "Entry script: $entryScriptPath"
-Write-Host "Using Python command: $pythonCommand"
+Write-Host "Virtual environment path: $venvPath"
+Write-Host "Using base Python command: $pythonCommand"
 
-Invoke-Step -Description "Show Python interpreter" -Command $pythonCommand -Arguments @(
+Invoke-Step -Description "Show base Python interpreter" -Command $pythonCommand -Arguments @(
     "-c",
     "import sys; print(sys.executable)"
 )
 
+if (-not (Test-Path $venvPath)) {
+    Invoke-Step -Description "Create project virtual environment" -Command $pythonCommand -Arguments @(
+        "-m",
+        "venv",
+        $venvPath
+    )
+} else {
+    Write-Host ""
+    Write-Host "==> Reuse existing virtual environment"
+    Write-Host "    $venvPath"
+}
+
+if (-not $DryRun -and -not (Test-Path $venvPython)) {
+    throw "Virtual environment Python was not found at: $venvPython"
+}
+
+Write-Host "Using virtual environment Python: $venvPython"
+
 if (-not $SkipPipUpgrade) {
-    Invoke-Step -Description "Upgrade pip" -Command $pythonCommand -Arguments @(
+    Invoke-Step -Description "Upgrade pip inside virtual environment" -Command $venvPython -Arguments @(
         "-m",
         "pip",
         "install",
@@ -120,7 +172,7 @@ if (-not $SkipPipUpgrade) {
     )
 }
 
-Invoke-Step -Description "Install project dependencies" -Command $pythonCommand -Arguments @(
+Invoke-Step -Description "Install project dependencies into virtual environment" -Command $venvPython -Arguments @(
     "-m",
     "pip",
     "install",
@@ -128,15 +180,16 @@ Invoke-Step -Description "Install project dependencies" -Command $pythonCommand 
     $requirementsPath
 )
 
-Invoke-Step -Description "Verify runtime imports" -Command $pythonCommand -Arguments @(
+Invoke-Step -Description "Verify runtime imports inside virtual environment" -Command $venvPython -Arguments @(
     "-c",
     $runtimeCheckCode
 )
 
 Write-Host ""
 if ($DryRun) {
-    Write-Host "Dry run complete. No packages were installed."
+    Write-Host "Dry run complete. No virtual environment was created and no packages were installed."
 } else {
-    Write-Host "Install and runtime verification complete."
+    Write-Host "Virtual environment setup and runtime verification complete."
 }
-Write-Host "Next step: run '$pythonCommand ollama_expert_bench.py' from $projectRoot"
+Write-Host ("Next step (PowerShell): & '" + $venvActivatePath + "'")
+Write-Host ("Or run directly: & '" + $venvPython + "' '" + $entryScriptPath + "'")

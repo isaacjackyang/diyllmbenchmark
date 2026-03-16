@@ -30,13 +30,9 @@
   - 若可用，報告會顯示 VRAM 指標
   - 若不可用，VRAM 欄位會顯示 `N/A`
 
-安裝 Python 套件：
+安裝 Python 套件時，請使用專案內的 `.venv`，不要直接裝到系統全域環境。下方若以 Windows 為例，其他平台只要把 `.\.venv\Scripts\python.exe` 換成 `./.venv/bin/python` 即可。
 
-```bash
-python -m pip install -r requirements.txt
-```
-
-Windows 也可以直接執行：
+Windows 建議直接執行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -45,14 +41,31 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 這個腳本會自動：
 
 - 找出可用的 `py` 或 `python`
-- 升級 `pip`
-- 依照 `requirements.txt` 安裝依賴
+- 在專案根目錄建立或重用 `.venv`
+- 升級 `.venv` 內的 `pip`
+- 依照 `requirements.txt` 安裝依賴到 `.venv`
 - 驗證 `ollama_expert_bench.py` 需要的關鍵套件是否真的能 import
 
-如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後執行上面的安裝指令，再執行：
+如果你想手動安裝，也請先建立虛擬環境：
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+macOS / Linux 則可用：
 
 ```bash
-python ollama_expert_bench.py
+python3 -m venv .venv
+./.venv/bin/python -m pip install --upgrade pip
+./.venv/bin/python -m pip install -r requirements.txt
+```
+
+如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後，使用 `.venv` 內的 Python 執行：
+
+```powershell
+.\.venv\Scripts\python.exe ollama_expert_bench.py
 ```
 
 ## 快速開始
@@ -73,8 +86,8 @@ python ollama_expert_bench.py
 
 2. 執行 benchmark：
 
-   ```bash
-   python ollama_expert_bench.py
+   ```powershell
+   .\.venv\Scripts\python.exe ollama_expert_bench.py
    ```
 
 3. 依照互動式選單完成設定。
@@ -85,8 +98,8 @@ python ollama_expert_bench.py
 
 目前正式入口檔案是：
 
-```bash
-python ollama_expert_bench.py
+```powershell
+.\.venv\Scripts\python.exe ollama_expert_bench.py
 ```
 
 這個單檔版本目前整合了：
@@ -97,6 +110,7 @@ python ollama_expert_bench.py
 - `tools` 模式下各模型的 tool call 成功次數與成功率摘要
 - 可把 `system prompt` 當成獨立測試維度，支援 `N/A`、固定數量或自訂數量，並用整頁編輯區直接貼上多段 prompt
 - 產出的 HTML 報告會用中英對照顯示主要段落、欄位與指標說明
+- HTML 報告中的結果卡片支援前端篩選，可勾選工具呼叫、thinking、有無 output、thinking mode 與狀態
 
 互動式整頁 grid 的操作方式如下：
 
@@ -261,18 +275,18 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
 
 - `TPS (chunk/s)`
   - 以有文字內容的串流 chunk 估算吞吐量，適合做相對比較
-- `Prompt Tokens`
-  - 後端有提供時，顯示本次請求的 prompt token 數
-- `Prefill TPS (tok/s)`
-  - 預填充速度；優先使用 Ollama 的 `prompt_eval_duration`，否則回退為 `prompt_tokens / TTFT`
 - `Total Output (chars)`
   - 該次 run 最終保留的可見輸出總字數
-- `Total Output Time (s)`
+- `Thinking Time (s)`
+  - 從第一段 thinking 到第一段 output 的時間；若沒有 output，則到串流結束
+- `Output Time (s)`
   - 從收到第一段 output 到串流結束的時間
-- `Thinking TPS (tok/s)`
-  - 以保留下來的 thinking 文字估算 token 吞吐量
-- `Output TPS (tok/s)`
-  - 以最終 dialogue output 估算 token 吞吐量
+- `Total Output Time (s)`
+  - 從最早的 thinking 或 output 開始計時；若兩者都沒有，則退回第一個串流事件到串流結束
+- `Thinking TPS (char/s)`
+  - 以保留下來的 thinking 文字字數除以 `Thinking Time (s)` 估算吞吐量
+- `Output TPS (char/s)`
+  - 以最終 dialogue output 字數除以 `Output Time (s)` 估算吞吐量
 - `Output/Thinking Ratio`
   - `output chars / thinking chars`，方便快速比較最終輸出相對於 thinking 的比例
 - `TTFT (s)`
@@ -319,19 +333,14 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
 
 ## 測試
 
-目前有一份針對串流分類邏輯的單元測試：
+目前這個 repo 沒有隨附可直接執行的自動化測試檔；先前文件提到的 `test_stream_classification.py` 目前並不存在。
 
-```bash
-python -m unittest test_stream_classification.py
-```
+現階段較接近「驗證」的方式有兩種：
 
-它主要驗證：
+- 執行 `install.ps1`，確認 `.venv` 建立、依賴安裝與關鍵套件 import 檢查都能通過
+- 實際跑一次 benchmark，確認互動流程、報告輸出與後端連線正常
 
-- 正常文字串流分類
-- 空回覆與中斷情境
-- `tools` 模式下的 `tool_call` 判定
-- reasoning / thinking 欄位萃取
-- 報告摘要對 `N/A` 欄位的輸出
+如果之後補上正式測試檔，再把執行指令與覆蓋範圍補回這一節。
 
 ## 注意事項
 
