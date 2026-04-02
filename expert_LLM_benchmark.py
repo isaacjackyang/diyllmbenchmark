@@ -98,6 +98,14 @@ PARAM_INFO = {
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "top_p", "llama.cpp": "top_p"},
     },
+    "top_k": {
+        "label": "Top-K 候選數",
+        "range": "0 - 200",
+        "desc": "限制只從前 K 個高機率 token 中取樣；llama.cpp 常用 40 左右。",
+        "default": "20, 40",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "top_k"},
+    },
     "min_p": {
         "label": "最小概率 (Min_P)",
         "range": "0.0 - 1.0",
@@ -106,6 +114,30 @@ PARAM_INFO = {
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "min_p", "llama.cpp": "min_p"},
     },
+    "typical_p": {
+        "label": "局部典型採樣 (Typical_P)",
+        "range": "0.0 - 1.0",
+        "desc": "llama.cpp 的 locally typical sampling；1.0 代表關閉。",
+        "default": "1.0, 0.95",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "typical_p"},
+    },
+    "dynatemp_range": {
+        "label": "動態溫度範圍 (Dynatemp Range)",
+        "range": "0.0 - 2.0",
+        "desc": "讓實際溫度在 temperature 上下浮動；0.0 代表關閉。",
+        "default": "0.0, 0.5",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dynatemp_range"},
+    },
+    "dynatemp_exponent": {
+        "label": "動態溫度指數 (Dynatemp Exponent)",
+        "range": "0.0 - 5.0",
+        "desc": "調整 dynatemp 的變化曲線；通常搭配 dynatemp_range 一起測。",
+        "default": "1.0, 2.0",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dynatemp_exponent"},
+    },
     "repeat_penalty": {
         "label": "重複懲罰 (Repeat Penalty)",
         "range": "1.0 - 2.0",
@@ -113,6 +145,103 @@ PARAM_INFO = {
         "default": "1.05, 1.15",
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "repeat_penalty", "llama.cpp": "repeat_penalty"},
+    },
+    "repeat_last_n": {
+        "label": "重複檢查視窗 (Repeat Last N)",
+        "range": "-1, 0 - 4096",
+        "desc": "llama.cpp 重複懲罰要回看多少 token；-1 代表使用 context size。",
+        "default": "64, 256",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "repeat_last_n"},
+    },
+    "presence_penalty": {
+        "label": "出現懲罰 (Presence Penalty)",
+        "range": "-2.0 - 2.0",
+        "desc": "降低已出現過主題再次被選中的機率；0.0 代表關閉。",
+        "default": "0.0, 0.5",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "presence_penalty"},
+    },
+    "frequency_penalty": {
+        "label": "頻率懲罰 (Frequency Penalty)",
+        "range": "-2.0 - 2.0",
+        "desc": "依出現次數加重懲罰，能更明顯壓制重複 token。",
+        "default": "0.0, 0.5",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "frequency_penalty"},
+    },
+    "dry_multiplier": {
+        "label": "DRY 倍率 (Dry Multiplier)",
+        "range": "0.0 - 2.0",
+        "desc": "Don't Repeat Yourself 懲罰強度；0.0 代表關閉。",
+        "default": "0.0, 0.8",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dry_multiplier"},
+    },
+    "dry_base": {
+        "label": "DRY 基底 (Dry Base)",
+        "range": "1.0 - 4.0",
+        "desc": "DRY 懲罰成長基底，數值越大重複延伸時罰得越快。",
+        "default": "1.75, 2.0",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dry_base"},
+    },
+    "dry_allowed_length": {
+        "label": "DRY 容許長度 (Dry Allowed Length)",
+        "range": "0 - 32",
+        "desc": "重複片段在多長之前不加重 DRY 懲罰。",
+        "default": "2, 4",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dry_allowed_length"},
+    },
+    "dry_penalty_last_n": {
+        "label": "DRY 回看視窗 (Dry Penalty Last N)",
+        "range": "-1, 0 - 4096",
+        "desc": "DRY 要掃描多少 token；-1 代表使用 context size。",
+        "default": "-1, 256",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "dry_penalty_last_n"},
+    },
+    "mirostat": {
+        "label": "Mirostat 模式",
+        "range": "0, 1, 2",
+        "desc": "llama.cpp 的 Mirostat 採樣；0 關閉，1/2 為不同版本。",
+        "default": "0, 2",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "mirostat"},
+    },
+    "mirostat_tau": {
+        "label": "Mirostat 熵目標 (Tau)",
+        "range": "0.0 - 10.0",
+        "desc": "Mirostat 目標熵；越高通常越發散。",
+        "default": "5.0, 8.0",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "mirostat_tau"},
+    },
+    "mirostat_eta": {
+        "label": "Mirostat 學習率 (Eta)",
+        "range": "0.01 - 1.0",
+        "desc": "Mirostat 調整速度；越大反應越激進。",
+        "default": "0.1, 0.3",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "mirostat_eta"},
+    },
+    "seed": {
+        "label": "隨機種子 (Seed)",
+        "range": "-1, 0 - 2147483647",
+        "desc": "固定後可重現結果；-1 代表每次使用隨機 seed。",
+        "default": "-1, 42",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "seed"},
+    },
+    "ignore_eos": {
+        "label": "忽略 EOS (Ignore EOS)",
+        "range": "enable | disable",
+        "desc": "忽略結束 token 持續生成；通常只建議在特定壓測時使用。",
+        "default": "disable, enable",
+        "value_type": "boolean",
+        "backends": ["llama.cpp"],
+        "backend_keys": {"llama.cpp": "ignore_eos"},
     },
     "num_gpu": {
         "label": "GPU 層數 / 顯存卸載",
@@ -135,8 +264,34 @@ PARAM_INFO = {
 }
 
 PARAM_GROUPS = {
-    "🔥 生成核心": ["temperature", "num_ctx", "num_predict"],
-    "⚖️ 採樣與懲罰": ["top_p", "min_p", "repeat_penalty"],
+    "🔥 生成核心": [
+        "temperature",
+        "num_ctx",
+        "num_predict",
+        "top_p",
+        "top_k",
+        "min_p",
+        "typical_p",
+        "dynatemp_range",
+        "dynatemp_exponent",
+    ],
+    "⚖️ 採樣與懲罰": [
+        "repeat_penalty",
+        "repeat_last_n",
+        "presence_penalty",
+        "frequency_penalty",
+        "dry_multiplier",
+        "dry_base",
+        "dry_allowed_length",
+        "dry_penalty_last_n",
+    ],
+    "🌀 採樣策略與控制": [
+        "mirostat",
+        "mirostat_tau",
+        "mirostat_eta",
+        "seed",
+        "ignore_eos",
+    ],
     "🧠 Thinking / Reasoning": ["enable_thinking"],
     "🖥️ 硬體與部署": ["num_gpu"],
 }
@@ -191,6 +346,14 @@ OLLAMA_HOST = "http://localhost:11434"
 OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
 DEFAULT_LLAMA_PORT = "8080"
 BACKEND_CHECK_TIMEOUT_S = 3
+BACKEND_LABELS = {
+    "ollama": "Ollama",
+    "llama.cpp": "llama.cpp (llama-server)",
+}
+
+
+def get_backend_display_name(backend):
+    return BACKEND_LABELS.get(backend, backend)
 
 
 def normalize_local_port(raw_port, default=DEFAULT_LLAMA_PORT):
@@ -1742,11 +1905,11 @@ def pause_before_exit():
 
     try:
         if msvcrt is not None:
-            print("\n按任意鍵結束...", end="", flush=True)
+            print("\nPress any key to exit... / 按任意鍵結束...", end="", flush=True)
             msvcrt.getch()
             print()
         else:
-            input("\n按 Enter 結束...")
+            input("\nPress Enter to exit... / 按 Enter 結束...")
     except (EOFError, KeyboardInterrupt):
         pass
 
@@ -1816,16 +1979,16 @@ def ensure_runtime_ready():
 
 
 def persist_crash_log(error_text):
-    crash_log_path = Path("ollama_expert_bench_crash.log")
+    crash_log_path = Path("expert_LLM_benchmark_crash.log")
     crash_log_path.write_text(error_text, encoding="utf-8")
     return crash_log_path
 
 
 def get_project_python_command_hint():
     if sys.platform == "win32":
-        return r".\.venv\Scripts\python.exe ollama_expert_bench.py"
+        return r".\.venv\Scripts\python.exe expert_LLM_benchmark.py"
 
-    return "./.venv/bin/python ollama_expert_bench.py"
+    return "./.venv/bin/python expert_LLM_benchmark.py"
 
 
 def handle_fatal_error(exc):
@@ -1859,7 +2022,7 @@ def handle_fatal_error(exc):
                 "請改用 PowerShell / CMD 執行，或把 crash log 傳回來。",
             ]
         )
-        show_windows_error_dialog("ollama_expert_bench 啟動失敗", dialog_message)
+        show_windows_error_dialog("expert_LLM_benchmark 啟動失敗", dialog_message)
 
 
 def select_models_and_url(backend, previous_url=None, previous_models=None):
@@ -3595,7 +3758,7 @@ def main():
 
     results_df = run_bench(config)
     if results_df.empty:
-        print("No benchmark rows were produced.")
+        print("No benchmark rows were produced. / 沒有產生任何 benchmark 結果列。")
         return
 
     ok_count = int((results_df["Status"] == "ok").sum())
@@ -4136,13 +4299,16 @@ def run_bench(config):
     vram_monitoring_enabled = query_nvidia_vram_snapshot() is not None
     config["vram_monitoring"] = "nvidia-smi" if vram_monitoring_enabled else "unavailable"
 
-    print(f"\nStarting benchmark with {total_runs} runs. Mode: {capability_label}")
-    print("Chat mode focuses on TPS/TTFT. Tools mode focuses on tool_call success and first event latency.")
-    print(f"System prompt variants: {len(system_prompt_variants)}")
+    print(f"\nStarting benchmark / 開始 benchmark，共 {total_runs} 次執行。Mode / 模式: {capability_label}")
+    print(
+        "Chat mode focuses on TPS/TTFT. Tools mode focuses on tool_call success and first event latency. / "
+        "Chat 模式主要看 TPS 與 TTFT；Tools 模式主要看 tool_call 成功率與首事件延遲。"
+    )
+    print(f"System prompt variants / System prompt 變體數: {len(system_prompt_variants)}")
     if vram_monitoring_enabled:
-        print("VRAM monitoring: enabled via nvidia-smi")
+        print("VRAM monitoring / VRAM 監控: enabled via nvidia-smi / 已透過 nvidia-smi 啟用")
     else:
-        print("VRAM monitoring: nvidia-smi not available, VRAM fields will be N/A")
+        print("VRAM monitoring / VRAM 監控: nvidia-smi not available, VRAM fields will be N/A / 未偵測到 nvidia-smi，VRAM 欄位將顯示 N/A")
 
     run_index = 0
     for model in config["models"]:
@@ -4866,6 +5032,9 @@ def build_param_rows(backend):
     rows = []
     for key in ordered_param_keys():
         info = PARAM_INFO[key]
+        supported = backend in info["backends"]
+        if not supported:
+            continue
         rows.append(
             ParamGridRow(
                 key=key,
@@ -4873,7 +5042,7 @@ def build_param_rows(backend):
                 label=info["label"],
                 range_text=info["range"],
                 desc=info["desc"],
-                supported=backend in info["backends"],
+                supported=supported,
                 default_value=str(info["default"]),
                 raw_value=str(info["default"]),
             )
@@ -4923,7 +5092,7 @@ def row_value_count(row):
         return "ERR"
 
 
-def build_grid_fragments(rows, selected_row_index, selected_column_index, message, message_style):
+def build_grid_fragments(rows, selected_row_index, selected_column_index, message, message_style, backend):
     from prompt_toolkit.formatted_text import to_formatted_text
 
     selected_row = rows[selected_row_index]
@@ -4931,29 +5100,34 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
     combo_count = "ERR" if preview_error else str(estimate_combo_count(preview_params or {}))
     selected_count = sum(1 for row in rows if row.supported and row.enabled)
     active_column_name = "state" if selected_column_index == 0 else "values"
+    backend_label = get_backend_display_name(backend)
 
     fragments = []
     fragments.extend(
         to_formatted_text(
             [
-                ("class:title", "LLM Benchmark | Full-Page Parameter Grid\n"),
+                ("class:title", f"LLM Benchmark / LLM 基準測試 | {backend_label} Parameter Grid / {backend_label} 參數表\n"),
                 (
                     "class:subtitle",
-                    "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
-                    "Type values in Values (numbers or enable/disable) | Backspace deletes or goes back from State | "
-                    "d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
+                    "Arrow keys move / 方向鍵移動 | Left/Right switch cell / 左右切換欄位 | "
+                    "Space toggles N/A/TEST / Space 切換 N/A 或 TEST | "
+                    "Type values in Values / 在 Values 欄輸入測試值 | "
+                    "Backspace deletes or goes back from State / Backspace 刪字或在 State 欄返回上一階段 | "
+                    "d restores default / d 恢復預設值 | Enter/Ctrl-S saves / Enter 或 Ctrl-S 儲存 | "
+                    "Esc cancels / Esc 取消\n\n",
                 ),
+                ("class:panel.label", f"Backend View / 目前頁面: {backend_label} | Available Params / 可調參數數: {len(rows)}\n\n"),
             ]
         )
     )
 
     header_cells = {
         "idx": "#",
-        "param_key": "Param Key",
-        "state": "State",
-        "count": "Count",
-        "values": "Values",
-        "range_text": "Range",
+        "param_key": "Param / 參數",
+        "state": "State / 狀態",
+        "count": "Count / 數量",
+        "values": "Values / 值",
+        "range_text": "Range / 範圍",
     }
     for column_name, width in TABLE_COLUMNS:
         fragments.append(("class:table.header", truncate_text(header_cells[column_name], width)))
@@ -4968,7 +5142,7 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
             row_style = "class:table.row.selected"
 
         state_text = "LOCK" if not row.supported else "TEST" if row.enabled else "N/A"
-        value_text = "backend n/a" if not row.supported else row.raw_value if row.enabled else "N/A"
+        value_text = "unsupported / 不支援" if not row.supported else row.raw_value if row.enabled else "N/A"
         cell_values = {
             "idx": f"{row_index + 1:02d}",
             "param_key": row.key,
@@ -4992,17 +5166,17 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
         to_formatted_text(
             [
                 ("", "\n"),
-                ("class:panel.title", "Selected Parameter\n"),
-                ("class:panel.label", f"Key: {selected_row.key}\n"),
-                ("class:panel.label", f"Label: {selected_row.label}\n"),
-                ("class:panel.label", f"Groups: {selected_row.group}\n"),
-                ("class:panel.label", f"Supports: {support_text}\n"),
-                ("class:panel.label", f"Default values: {selected_row.default_value}\n"),
-                ("class:panel.label", f"Description: {selected_row.desc}\n\n"),
-                ("class:panel.title", "Config Preview\n"),
-                ("class:panel.label", f"Selected params: {selected_count}\n"),
-                ("class:panel.label", f"Combination count: {combo_count}\n"),
-                (status_style, f"Validation: {'OK' if not preview_error else preview_error}\n"),
+                ("class:panel.title", "Selected Parameter / 目前參數\n"),
+                ("class:panel.label", f"Key / 參數鍵: {selected_row.key}\n"),
+                ("class:panel.label", f"Label / 名稱: {selected_row.label}\n"),
+                ("class:panel.label", f"Group / 群組: {selected_row.group}\n"),
+                ("class:panel.label", f"Supported Backends / 支援後端: {support_text}\n"),
+                ("class:panel.label", f"Default Values / 預設值: {selected_row.default_value}\n"),
+                ("class:panel.label", f"Description / 說明: {selected_row.desc}\n\n"),
+                ("class:panel.title", "Config Preview / 設定預覽\n"),
+                ("class:panel.label", f"Selected Params / 已選參數數: {selected_count}\n"),
+                ("class:panel.label", f"Combination Count / 組合數: {combo_count}\n"),
+                (status_style, f"Validation / 驗證: {'OK / 正常' if not preview_error else preview_error}\n"),
             ]
         )
     )
@@ -5053,32 +5227,47 @@ def edit_param_grid(backend, initial_params=None):
     def toggle_current_row():
         row = current_row()
         if not row.supported:
-            set_message(f"{row.key} is not supported on {backend}.", "class:status.warning")
+            set_message(
+                f"{row.key} is not supported on {backend}. / {row.key} 不支援 {backend}。",
+                "class:status.warning",
+            )
             return
 
         row.enabled = not row.enabled
         if row.enabled and not row.raw_value.strip():
             row.raw_value = row.default_value
-        set_message(f"{row.key} -> {'TEST' if row.enabled else 'N/A'}", "class:hint")
+        set_message(
+            f"{row.key} -> {'TEST' if row.enabled else 'N/A'} / {row.key} 已切換為 {'測試' if row.enabled else '不測試'}",
+            "class:hint",
+        )
 
     def restore_default():
         row = current_row()
         if not row.supported:
-            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            set_message(
+                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
+                "class:status.warning",
+            )
             return
 
         row.enabled = True
         row.raw_value = row.default_value
-        set_message(f"{row.key} restored to default values.", "class:hint")
+        set_message(
+            f"{row.key} restored to default values. / {row.key} 已恢復預設值。",
+            "class:hint",
+        )
 
     def append_value(char):
         row = current_row()
         if not row.supported:
-            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            set_message(
+                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
+                "class:status.warning",
+            )
             return
 
         if char not in ALLOWED_VALUE_CHARS:
-            set_message(f"Unsupported character: {char!r}", "class:status.warning")
+            set_message(f"Unsupported character: {char!r} / 不支援的字元：{char!r}", "class:status.warning")
             return
 
         if not row.enabled:
@@ -5086,22 +5275,28 @@ def edit_param_grid(backend, initial_params=None):
             if row.raw_value == "N/A":
                 row.raw_value = ""
         row.raw_value += char
-        set_message(f"Editing {row.key}", "class:hint")
+        set_message(f"Editing {row.key} / 正在編輯 {row.key}", "class:hint")
 
     def backspace_value():
         row = current_row()
         if not row.supported:
-            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
+            set_message(
+                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
+                "class:status.warning",
+            )
             return
 
         if not row.enabled:
             row.enabled = True
             row.raw_value = row.default_value
-            set_message(f"{row.key} enabled with default values.", "class:hint")
+            set_message(
+                f"{row.key} enabled with default values. / {row.key} 已啟用並帶入預設值。",
+                "class:hint",
+            )
             return
 
         row.raw_value = row.raw_value[:-1]
-        set_message(f"Editing {row.key}", "class:hint")
+        set_message(f"Editing {row.key} / 正在編輯 {row.key}", "class:hint")
 
     def accept(event):
         params, error_row_index, error_message = validate_param_rows(rows)
@@ -5120,6 +5315,7 @@ def edit_param_grid(backend, initial_params=None):
             selected_column_index=state["column_index"],
             message=state["message"],
             message_style=state["message_style"],
+            backend=backend,
         ),
         focusable=True,
         show_cursor=False,
@@ -5196,7 +5392,7 @@ def edit_param_grid(backend, initial_params=None):
         if state["column_index"] == 1:
             current_row().raw_value = ""
             current_row().enabled = True
-            set_message(f"Cleared {current_row().key}.", "class:hint")
+            set_message(f"Cleared {current_row().key}. / 已清空 {current_row().key}。", "class:hint")
             refresh(event)
 
     @kb.add("d")
@@ -5247,8 +5443,9 @@ def parse_system_prompt_blocks(raw_text, expected_count):
     ]
     if len(blocks) != expected_count:
         raise ValueError(
-            f"Expected {expected_count} system prompt blocks, but found {len(blocks)}. "
-            "Use a line containing only --- between prompts."
+            f"Expected {expected_count} system prompt blocks, but found {len(blocks)}. / "
+            f"預期應有 {expected_count} 段 system prompt，但目前找到 {len(blocks)} 段。"
+            " Use a line containing only --- between prompts. / 請用單獨一行的 --- 分隔不同 prompt。"
         )
     return blocks
 
@@ -5272,7 +5469,8 @@ def edit_system_prompt_blocks(expected_count):
     state = {
         "message": (
             f"Paste {expected_count} system prompt block(s). Use --- on its own line as a separator. "
-            "Ctrl-S saves, Esc cancels."
+            f"Ctrl-S saves, Esc cancels. / 請貼上 {expected_count} 段 system prompt，段落之間用單獨一行的 --- 分隔。"
+            "Ctrl-S 儲存，Esc 取消。"
         ),
         "style": "class:hint",
     }
@@ -5456,7 +5654,7 @@ def select_system_prompt_variants(existing_prompts=None):
         if selection == "custom":
             while True:
                 raw_count = ask_text_with_back(
-                    "How many system prompt variants? / 要測幾種 system prompt？",
+                    "How many system prompt variants? / 要測幾種 system prompt 變體？",
                     default=str(len(existing_prompts) or 1),
                 )
                 if raw_count is None:
@@ -5466,10 +5664,10 @@ def select_system_prompt_variants(existing_prompts=None):
                 try:
                     expected_count = int((raw_count or "").strip())
                 except ValueError:
-                    print("System prompt count must be an integer. / system prompt 數量必須是整數。")
+                    print("System prompt count must be an integer. / system prompt 變體數量必須是整數。")
                     continue
                 if expected_count < 0:
-                    print("System prompt count cannot be negative. / system prompt 數量不能小於 0。")
+                    print("System prompt count cannot be negative. / system prompt 變體數量不能小於 0。")
                     continue
                 if expected_count == 0:
                     return []
@@ -5479,7 +5677,7 @@ def select_system_prompt_variants(existing_prompts=None):
 
         prompts = edit_system_prompt_blocks(expected_count)
         if prompts is None:
-            print("System prompt editor cancelled. / system prompt 編輯已取消。")
+            print("System prompt editor was cancelled. / system prompt 編輯已取消。")
             return None
         if prompts == BACK_ACTION:
             continue
@@ -5492,51 +5690,56 @@ def print_config_review(config):
     system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
 
     print("\n" + "=" * 62)
-    print("Config Review")
+    print("Config Review / 設定確認")
     print("=" * 62)
-    print(f"- Backend: {config['backend']}")
-    print(f"- Capability: {config['capability']}")
-    print(f"- Base URL: {config['url']}")
-    print(f"- Models: {', '.join(config['models'])}")
-    print(f"- Param count: {len(params)}")
-    print(f"- Combination count: {combo_count}")
-    print(f"- System prompt variants: {len(system_prompt_variants)}")
+    print(f"- Backend / 後端: {config['backend']}")
+    print(f"- Benchmark Mode / 測試模式: {config['capability']}")
+    print(f"- Base URL / 基礎 URL: {config['url']}")
+    print(f"- Models / 模型: {', '.join(config['models'])}")
+    print(f"- Param Count / 參數數量: {len(params)}")
+    print(f"- Combination Count / 組合數: {combo_count}")
+    print(f"- System Prompt Variants / System Prompt 變體數: {len(system_prompt_variants)}")
     if params:
-        print("- Parameter values:")
+        print("- Parameter Values / 參數值:")
         for key, values in params.items():
             print(f"  - {key}: {values}")
     else:
-        print("- Parameter values: use backend defaults only")
+        print("- Parameter Values / 參數值: use backend defaults only / 僅使用後端預設值")
     if system_prompt_variants[0]["label"] == "N/A" and len(system_prompt_variants) == 1:
-        print("- System prompts: N/A")
+        print("- System Prompts / System Prompt: N/A / 未額外加入")
     else:
-        print("- System prompt previews:")
+        print("- System Prompt Previews / System Prompt 預覽:")
         for variant in system_prompt_variants:
             preview = variant["text"].splitlines()[0] if variant["text"] else ""
             preview = preview[:90] + ("..." if len(preview) > 90 else "")
-            print(f"  - {variant['label']}: {preview} ({len(variant['text'])} chars)")
+            print(f"  - {variant['label']}: {preview} ({len(variant['text'])} chars / 字元)")
 
 
 def build_console_summary_dataframe(results_df):
-    summary_df = build_summary_dataframe(results_df)
-    console_columns = ["Run", "Status"]
-    if "Capability" in summary_df.columns:
-        console_columns.append("Capability")
-    if "System Prompt" in summary_df.columns:
-        console_columns.append("System Prompt")
+    def console_column_name(column_name):
+        return REPORT_HEADER_BILINGUAL_MAP.get(column_name, column_name).replace("<br>", " / ")
+
+    summary_df = localize_report_dataframe(build_summary_dataframe(results_df))
+    summary_df = summary_df.rename(columns=lambda column_name: column_name.replace("<br>", " / "))
+
+    console_columns = [console_column_name("Run"), console_column_name("Status")]
+    if console_column_name("Capability") in summary_df.columns:
+        console_columns.append(console_column_name("Capability"))
+    if console_column_name("System Prompt") in summary_df.columns:
+        console_columns.append(console_column_name("System Prompt"))
     console_columns.extend(
         [
-            "Output Category",
-            "Finish Reason",
-            "Model",
-            "TPS (chunk/s)",
-            "Thinking TPS (token/s)",
-            "Output TPS (token/s)",
-            "Output/Thinking Ratio",
-            "TTFT (s)",
-            "First Event (s)",
-            "Chunks (content/total)",
-            "Config",
+            console_column_name("Output Category"),
+            console_column_name("Finish Reason"),
+            console_column_name("Model"),
+            console_column_name("TPS (chunk/s)"),
+            console_column_name("Thinking TPS (token/s)"),
+            console_column_name("Output TPS (token/s)"),
+            console_column_name("Output/Thinking Ratio"),
+            console_column_name("TTFT (s)"),
+            console_column_name("First Event (s)"),
+            console_column_name("Chunks (content/total)"),
+            console_column_name("Config"),
         ]
     )
     return summary_df[console_columns]
@@ -5544,7 +5747,7 @@ def build_console_summary_dataframe(results_df):
 
 def interactive_config():
     print("\n" + "=" * 62)
-    print("LLM Benchmark")
+    print("LLM Benchmark / LLM 基準測試")
     print("=" * 62)
     state = {}
     stage_index = 0
@@ -5552,7 +5755,7 @@ def interactive_config():
     while True:
         if stage_index == 0:
             backend = ask_select_with_back(
-                "Select backend:",
+                "Select backend / 選擇後端:",
                 choices=[
                     Choice("Ollama", value="ollama"),
                     Choice("llama.cpp (llama-server)", value="llama.cpp"),
@@ -5571,10 +5774,10 @@ def interactive_config():
 
         if stage_index == 1:
             capability = ask_select_with_back(
-                "Select benchmark mode:",
+                "Select benchmark mode / 選擇 benchmark 模式:",
                 choices=[
-                    Choice("Chat | Standard chat response benchmark", value="chat"),
-                    Choice("Tools | Check whether the model emits tool_calls", value="tools"),
+                    Choice("Chat | Standard chat response benchmark / 一般文字回覆測試", value="chat"),
+                    Choice("Tools | Check whether the model emits tool_calls / 檢查是否輸出 tool_calls", value="tools"),
                 ],
                 default=state.get("capability"),
             )
@@ -5600,7 +5803,7 @@ def interactive_config():
                 continue
             url, models = model_result
             if not models:
-                print("No models available. Cancelled.")
+                print("No models are available. Cancelled. / 沒有可用模型，已取消。")
                 return None
             state["url"] = url
             state["models"] = models
@@ -5610,7 +5813,7 @@ def interactive_config():
         if stage_index == 3:
             final_params = edit_param_grid(state["backend"], initial_params=state.get("params"))
             if final_params is None:
-                print("Parameter grid cancelled.")
+                print("Parameter grid was cancelled. / 參數表設定已取消。")
                 return None
             if final_params == BACK_ACTION:
                 stage_index = 2
@@ -5621,7 +5824,7 @@ def interactive_config():
 
         if stage_index == 4:
             prompt = ask_text_with_back(
-                "Benchmark prompt:",
+                "Benchmark prompt / 測試 prompt:",
                 default=state.get("prompt", CAPABILITY_DEFAULTS[state["capability"]]),
             )
             if prompt is None:
@@ -5656,7 +5859,7 @@ def interactive_config():
 
         print_config_review(config)
         confirmed = ask_confirm_with_back(
-            "Start benchmark with this configuration?",
+            "Start benchmark with this configuration? / 要用這份設定開始 benchmark 嗎？",
             default=True,
         )
         if confirmed is None:
@@ -5665,7 +5868,7 @@ def interactive_config():
             stage_index = 5
             continue
         if not confirmed:
-            print("Cancelled before benchmark run.")
+            print("Cancelled before benchmark run. / 已在 benchmark 開始前取消。")
             return None
         return config
 
@@ -5692,7 +5895,7 @@ def main():
     print("\n" + "=" * 62)
     console_df = build_console_summary_dataframe(results_df)
     print(dataframe_to_text_table(console_df))
-    print(f"\nResult counts: ok={ok_count}, warning={warning_count}, error={error_count}")
+    print(f"\nResult counts / 結果統計: ok={ok_count}, warning={warning_count}, error={error_count}")
 
     report_path = None
     chart_path = None
@@ -5701,7 +5904,7 @@ def main():
     try:
         summary_excel_path = save_summary_excel_workbook(results_df, config, report_stem)
     except Exception as exc:
-        print(f"Summary Excel export failed: {exc}")
+        print(f"Summary Excel export failed / Summary Excel 匯出失敗: {exc}")
 
     try:
         report_path = save_markdown_report(
@@ -5711,31 +5914,31 @@ def main():
             summary_excel_path=summary_excel_path,
         )
     except Exception as exc:
-        print(f"Report generation failed: {exc}")
+        print(f"Report generation failed / 報告產生失敗: {exc}")
 
     try:
         chart_path = plot_results(results_df, f"{report_stem}.png", capability=capability)
     except Exception as exc:
-        print(f"Chart generation failed: {exc}")
+        print(f"Chart generation failed / 圖表產生失敗: {exc}")
 
     try:
         export_best_config(results_df, config, output_dir=report_dir)
     except Exception as exc:
-        print(f"best_config export failed: {exc}")
+        print(f"best_config export failed / best_config 匯出失敗: {exc}")
 
-    print(f"\nSaved artifacts directory: {report_dir}")
+    print(f"\nSaved artifacts directory / 輸出資料夾: {report_dir}")
     if report_path:
-        print(f"\nSaved report: {report_path}")
+        print(f"\nSaved report / 已儲存報告: {report_path}")
     else:
-        print("\nMarkdown report was not saved.")
+        print("\nMarkdown report was not saved. / HTML 報告未成功輸出。")
     if summary_excel_path:
-        print(f"Saved summary Excel: {summary_excel_path}")
+        print(f"Saved summary Excel / 已儲存 Summary Excel: {summary_excel_path}")
 
-    print(f"Saved raw outputs: {raw_outputs_path}")
+    print(f"Saved raw outputs / 已儲存原始輸出: {raw_outputs_path}")
     if chart_path:
-        print(f"Saved chart: {chart_path}")
+        print(f"Saved chart / 已儲存圖表: {chart_path}")
     else:
-        print("Skipped chart output because there were no eligible successful results.")
+        print("Skipped chart output because there were no eligible successful results. / 因為沒有可繪圖的成功結果，所以略過圖表輸出。")
 
 if __name__ == "__main__":
     exit_code = 0
@@ -5743,7 +5946,7 @@ if __name__ == "__main__":
         ensure_runtime_ready()
         main()
     except KeyboardInterrupt:
-        print("\n已取消執行。")
+        print("\nExecution cancelled. / 已取消執行。")
     except Exception as exc:
         exit_code = 1
         handle_fatal_error(exc)

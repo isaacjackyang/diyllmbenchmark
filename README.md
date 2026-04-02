@@ -46,7 +46,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 - 在專案根目錄建立或重用 `.venv`
 - 升級 `.venv` 內的 `pip`
 - 依照 `requirements.txt` 安裝依賴到 `.venv`
-- 驗證 `ollama_expert_bench.py` 需要的關鍵套件是否真的能 import
+- 驗證 `expert_LLM_benchmark.py` 需要的關鍵套件是否真的能 import
 
 如果你想手動安裝，也請先建立虛擬環境：
 
@@ -67,7 +67,7 @@ python3 -m venv .venv
 如果你是搬到另一台電腦，建議不要雙擊 `.py`，而是在專案目錄開 PowerShell / CMD 後，使用 `.venv` 內的 Python 執行：
 
 ```powershell
-.\.venv\Scripts\python.exe ollama_expert_bench.py
+.\.venv\Scripts\python.exe expert_LLM_benchmark.py
 ```
 
 ## 快速開始
@@ -89,7 +89,7 @@ python3 -m venv .venv
 2. 執行 benchmark：
 
    ```powershell
-   .\.venv\Scripts\python.exe ollama_expert_bench.py
+   .\.venv\Scripts\python.exe expert_LLM_benchmark.py
    ```
 
 3. 依照互動式選單完成設定。
@@ -101,7 +101,7 @@ python3 -m venv .venv
 目前正式入口檔案是：
 
 ```powershell
-.\.venv\Scripts\python.exe ollama_expert_bench.py
+.\.venv\Scripts\python.exe expert_LLM_benchmark.py
 ```
 
 這個單檔版本目前整合了：
@@ -111,6 +111,7 @@ python3 -m venv .venv
 - `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
 - `tools` 模式下各模型的 tool call 成功次數與成功率摘要
 - 可把 `system prompt` 當成獨立測試維度，支援 `N/A`、固定數量或自訂數量，並用整頁編輯區直接貼上多段 prompt，方便做同模型不同 `system prompt` 的比較
+- 參數頁會依目前 backend 自動切換成 `Ollama` 版或 `llama.cpp` 版，只顯示該後端可調參數
 - 產出的 HTML 報告會用中英對照顯示主要段落、欄位與指標說明
 - HTML 報告中的結果卡片支援前端篩選，可勾選工具呼叫、thinking、有無 output、thinking mode 與狀態
 
@@ -127,7 +128,10 @@ python3 -m venv .venv
 - `Enter` / `Ctrl+S`：確認設定並進入 review
 - `Esc`：取消
 
-這一頁會一次列出所有可調參數；若目前 backend 不支援，該列會顯示 `LOCK`。
+這一頁會依你目前選的 backend 自動切換：
+
+- `Ollama`：只顯示 `Ollama` 可調參數
+- `llama.cpp`：只顯示 `llama.cpp` 可調參數與額外的進階 sampling 參數
 
 在設定流程中，如果中途改變心意，也可以返回上一階段：
 
@@ -210,7 +214,7 @@ python3 -m venv .venv
 
 ## 可調參數
 
-程式內建以下參數，且會依後端自動過濾可用項目：
+程式內建以下參數，且參數頁會依後端自動切換，只顯示目前 backend 可用項目：
 
 | 參數 | 支援後端 | 用途 |
 | --- | --- | --- |
@@ -218,15 +222,32 @@ python3 -m venv .venv
 | `num_ctx` | `ollama` | 上下文長度，常影響長文能力與 TTFT |
 | `num_predict` | `ollama`, `llama.cpp` | 最大生成 token 數 |
 | `top_p` | `ollama`, `llama.cpp` | 核心採樣，降低時通常更保守 |
+| `top_k` | `llama.cpp` | 限制只從前 K 個候選 token 取樣 |
 | `min_p` | `ollama`, `llama.cpp` | 過濾低機率 token |
+| `typical_p` | `llama.cpp` | locally typical sampling，`1.0` 代表關閉 |
+| `dynatemp_range` | `llama.cpp` | 動態溫度範圍，讓實際溫度浮動 |
+| `dynatemp_exponent` | `llama.cpp` | 動態溫度變化曲線設定 |
 | `repeat_penalty` | `ollama`, `llama.cpp` | 降低重複輸出 |
+| `repeat_last_n` | `llama.cpp` | 重複懲罰回看的 token 視窗大小 |
+| `presence_penalty` | `llama.cpp` | 降低已出現過主題再次被取樣的機率 |
+| `frequency_penalty` | `llama.cpp` | 依出現頻率加重懲罰，抑制重複 token |
+| `dry_multiplier` | `llama.cpp` | DRY 重複懲罰倍率，`0.0` 代表關閉 |
+| `dry_base` | `llama.cpp` | DRY 懲罰成長基底 |
+| `dry_allowed_length` | `llama.cpp` | DRY 在幾個 token 內不加重懲罰 |
+| `dry_penalty_last_n` | `llama.cpp` | DRY 回看視窗大小 |
+| `mirostat` | `llama.cpp` | Mirostat 採樣模式，`0/1/2` |
+| `mirostat_tau` | `llama.cpp` | Mirostat 目標熵 |
+| `mirostat_eta` | `llama.cpp` | Mirostat 學習率 |
+| `seed` | `llama.cpp` | 固定隨機種子，方便重現結果 |
+| `ignore_eos` | `llama.cpp` | 忽略 EOS 持續生成 |
 | `enable_thinking` | `ollama`, `llama.cpp` | 測試 thinking / reasoning 開關對輸出與速度的影響 |
 | `num_gpu` | `ollama` | GPU 卸載相關設定，常明顯影響速度 |
 
 參數群組如下：
 
-- `生成核心`：`temperature`、`num_ctx`、`num_predict`
-- `採樣與懲罰`：`top_p`、`min_p`、`repeat_penalty`
+- `生成核心`：`temperature`、`num_ctx`、`num_predict`、`top_p`、`top_k`、`min_p`、`typical_p`、`dynatemp_range`、`dynatemp_exponent`
+- `採樣與懲罰`：`repeat_penalty`、`repeat_last_n`、`presence_penalty`、`frequency_penalty`、`dry_multiplier`、`dry_base`、`dry_allowed_length`、`dry_penalty_last_n`
+- `採樣策略與控制`：`mirostat`、`mirostat_tau`、`mirostat_eta`、`seed`、`ignore_eos`
 - `Thinking / Reasoning`：`enable_thinking`
 - `硬體與部署`：`num_gpu`
 
@@ -247,6 +268,7 @@ python3 -m venv .venv
 - 模型名稱只作為報告辨識用途，不會替你載入模型
 - `num_predict` 會映射為 `n_predict`
 - `enable_thinking` 會映射為 `chat_template_kwargs.enable_thinking=true/false`
+- 支援額外的 `llama.cpp` request-level sampling 參數，例如 `top_k`、`typical_p`、`repeat_last_n`、`presence_penalty`、`frequency_penalty`、`dry_*`、`mirostat*`、`seed`、`ignore_eos`
 
 ## 產出檔案
 
@@ -267,7 +289,7 @@ Benchmark 完成後，程式會自動建立 `Report/` 資料夾，並把本次 b
   - 若沒有成功結果，則不會產生
 - `Report/Ollama_Modelfile_Suggest`
   - 僅在最佳結果來自 `Ollama` 時產生
-- `ollama_expert_bench_crash.log`
+- `expert_LLM_benchmark_crash.log`
   - 只有程式啟動或執行失敗時才會出現
   - 可用來排查搬機或環境差異造成的閃退問題
 

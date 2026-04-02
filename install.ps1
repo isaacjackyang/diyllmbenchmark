@@ -9,7 +9,7 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
-$entryScriptPath = Join-Path $projectRoot "ollama_expert_bench.py"
+$entryScriptPath = Join-Path $projectRoot "expert_LLM_benchmark.py"
 $venvPath = Join-Path $projectRoot ".venv"
 $runtimeCheckCode = @'
 from importlib import import_module
