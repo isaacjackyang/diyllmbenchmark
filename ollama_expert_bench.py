@@ -187,14 +187,146 @@ TOOL_BENCHMARK_TOOLS = [
 ]
 
 
-def get_ollama_models():
+OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
+DEFAULT_LLAMA_PORT = "8080"
+BACKEND_CHECK_TIMEOUT_S = 3
+
+
+def normalize_local_port(raw_port, default=DEFAULT_LLAMA_PORT):
+    port_text = str(raw_port or default).strip() or default
+    if not port_text.isdigit():
+        return None, "Please enter a whole-number port between 1 and 65535. / 請輸入 1 到 65535 之間的整數端口。"
+
+    port_number = int(port_text)
+    if not 1 <= port_number <= 65535:
+        return None, "The port must be between 1 and 65535. / 端口必須介於 1 到 65535 之間。"
+    return str(port_number), None
+
+
+def inspect_backend_readiness(backend, url):
+    if backend == "ollama":
+        tags_url = f"{OLLAMA_HOST}/api/tags"
+        try:
+            response = requests.get(tags_url, timeout=BACKEND_CHECK_TIMEOUT_S)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            return {
+                "ok": False,
+                "models": [],
+                "message": (
+                    f"Unable to connect to Ollama at {OLLAMA_HOST}. Please start `ollama serve` first, then retry. / "
+                    f"無法連線到 {OLLAMA_HOST} 的 Ollama，請先啟動 `ollama serve`，再回來重試。"
+                ),
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "models": [],
+                "message": (
+                    f"Ollama responded, but {tags_url} did not return valid JSON. / "
+                    f"Ollama 有回應，但 {tags_url} 回傳的不是有效 JSON。"
+                ),
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+
+        if not isinstance(payload, dict):
+            return {
+                "ok": False,
+                "models": [],
+                "message": (
+                    f"Ollama responded, but the payload from {tags_url} was not in the expected format. / "
+                    f"Ollama 有回應，但 {tags_url} 的回傳格式不符合預期。"
+                ),
+                "detail": f"payload type: {type(payload).__name__}",
+            }
+
+        models = [model["name"] for model in payload.get("models", []) if model.get("name")]
+        warning = None
+        if not models:
+            warning = (
+                "Ollama is reachable, but `/api/tags` did not report any models. You can still type model names "
+                "manually, but the benchmark will fail if those models are not installed locally. / "
+                "Ollama 可正常連線，但 `/api/tags` 沒有回報任何模型。你仍可手動輸入模型名稱；若本機沒有"
+                "安裝那些模型，benchmark 還是會失敗。"
+            )
+        return {"ok": True, "models": models, "warning": warning, "checked_url": tags_url}
+
+    models_url = f"{url.rstrip('/')}/models"
     try:
-        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        response = requests.get(models_url, timeout=BACKEND_CHECK_TIMEOUT_S)
         response.raise_for_status()
-        models = response.json().get("models", [])
-        return [model["name"] for model in models if model.get("name")]
-    except requests.RequestException:
+        payload = response.json()
+    except requests.RequestException as exc:
+        return {
+            "ok": False,
+            "models": [],
+            "message": (
+                f"Unable to connect to the llama.cpp OpenAI-compatible endpoint at {models_url}. "
+                f"Please start `llama-server` on that port first, then retry. / 無法連線到 {models_url} 的 "
+                f"llama.cpp OpenAI 相容端點，請先在該端口啟動 `llama-server`，再回來重試。"
+            ),
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "models": [],
+            "message": (
+                f"The backend responded, but {models_url} did not return valid JSON. / "
+                f"後端有回應，但 {models_url} 回傳的不是有效 JSON。"
+            ),
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+
+    if not isinstance(payload, dict):
+        return {
+            "ok": False,
+            "models": [],
+            "message": (
+                f"The backend responded, but the `/v1/models` payload from {models_url} was not in the expected "
+                f"format. / 後端有回應，但 {models_url} 的 `/v1/models` 回傳格式不符合預期。"
+            ),
+            "detail": f"payload type: {type(payload).__name__}",
+        }
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return {
+            "ok": False,
+            "models": [],
+            "message": (
+                f"The backend responded, but the `/v1/models` payload from {models_url} was not in the expected "
+                f"format. / 後端有回應，但 {models_url} 的 `/v1/models` 回傳格式不符合預期。"
+            ),
+            "detail": f"payload keys: {', '.join(sorted(payload.keys()))}",
+        }
+
+    models = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if model_id:
+            models.append(model_id)
+
+    warning = None
+    if not models:
+        warning = (
+            "The backend is reachable, but `/v1/models` did not report any model IDs. Please confirm the loaded "
+            "model name before benchmarking. / 後端可正常連線，但 `/v1/models` 沒有回報任何模型 ID；"
+            "開始 benchmark 前請先確認實際載入中的模型名稱。"
+        )
+    return {"ok": True, "models": models, "warning": warning, "checked_url": models_url}
+
+
+def get_ollama_models():
+    backend_status = inspect_backend_readiness("ollama", OLLAMA_BASE_URL)
+    if not backend_status.get("ok"):
         return []
+    return backend_status.get("models", [])
 
 
 BOOLEAN_TRUE_ALIASES = {
@@ -1639,6 +1771,25 @@ def show_windows_error_dialog(title, message):
         return False
 
 
+def print_warning_box(message, detail=None):
+    print("\n" + "=" * 62)
+    print(f"⚠️ Warning / 警告\n{message}")
+    if detail:
+        print(f"Detail / 詳細資訊: {detail}")
+    print("=" * 62)
+
+
+def ask_backend_retry_or_back(message):
+    return ask_select_with_back(
+        message,
+        choices=[
+            Choice("Retry check / 重新檢查", value="retry"),
+            Choice("Go back / 返回上一階段", value="back"),
+        ],
+        default="retry",
+    )
+
+
 def ensure_runtime_ready():
     if not DEPENDENCY_IMPORT_ERRORS:
         return
@@ -1715,24 +1866,43 @@ def select_models_and_url(backend, previous_url=None, previous_models=None):
     previous_models = previous_models or []
 
     if backend == "ollama":
-        detected_models = get_ollama_models()
-        if detected_models:
-            choice_list = [
-                Choice(model_name, value=model_name, checked=model_name in previous_models)
-                for model_name in detected_models
-            ]
-            selected_models = ask_checkbox_with_back(
-                "Select benchmark models / 選擇測試模型:",
-                choices=choice_list,
-            )
-            if selected_models is None:
-                return None
-            if selected_models == BACK_ACTION:
-                return BACK_ACTION
-            if selected_models:
-                return "http://localhost:11434/v1", selected_models
-
         while True:
+            backend_status = inspect_backend_readiness("ollama", OLLAMA_BASE_URL)
+            if not backend_status.get("ok"):
+                print_warning_box(
+                    backend_status["message"],
+                    detail=backend_status.get("detail"),
+                )
+                retry_action = ask_backend_retry_or_back(
+                    "Ollama backend check failed. Retry after fixing it, or go back? / "
+                    "Ollama 後端檢查失敗。修正後要重試，還是返回上一階段？"
+                )
+                if retry_action is None:
+                    return None
+                if retry_action in (BACK_ACTION, "back"):
+                    return BACK_ACTION
+                continue
+
+            detected_models = backend_status.get("models", [])
+            if backend_status.get("warning"):
+                print_warning_box(backend_status["warning"])
+
+            if detected_models:
+                choice_list = [
+                    Choice(model_name, value=model_name, checked=model_name in previous_models)
+                    for model_name in detected_models
+                ]
+                selected_models = ask_checkbox_with_back(
+                    "Select benchmark models / 選擇測試模型:",
+                    choices=choice_list,
+                )
+                if selected_models is None:
+                    return None
+                if selected_models == BACK_ACTION:
+                    return BACK_ACTION
+                if selected_models:
+                    return OLLAMA_BASE_URL, selected_models
+
             manual_input = ask_text_with_back(
                 "Enter Ollama model names (comma separated) / 請輸入 Ollama 模型名稱（逗號分隔）:",
                 default=",".join(previous_models) if previous_models else "qwen3.5:latest",
@@ -1743,27 +1913,58 @@ def select_models_and_url(backend, previous_url=None, previous_models=None):
                 return BACK_ACTION
             models = [name.strip() for name in (manual_input or "").split(",") if name.strip()]
             if models:
-                return "http://localhost:11434/v1", models
-            print("At least one model is required. / 至少需要一個模型名稱。")
+                return OLLAMA_BASE_URL, models
+            print("Please enter at least one model name. / 請至少輸入一個模型名稱。")
 
-    port_default = "8080"
+    port_default = DEFAULT_LLAMA_PORT
     if previous_url and previous_url.startswith("http://localhost:") and previous_url.endswith("/v1"):
-        port_default = previous_url.removeprefix("http://localhost:").removesuffix("/v1") or "8080"
+        port_default = previous_url.removeprefix("http://localhost:").removesuffix("/v1") or DEFAULT_LLAMA_PORT
 
     while True:
-        port = ask_text_with_back(
+        raw_port = ask_text_with_back(
             "Enter llama-server port / 請輸入 llama-server 端口:",
             default=port_default,
         )
-        if port is None:
+        if raw_port is None:
             return None
-        if port == BACK_ACTION:
+        if raw_port == BACK_ACTION:
             return BACK_ACTION
+
+        port, port_error = normalize_local_port(raw_port, default=port_default)
+        if port_error:
+            print_warning_box(port_error)
+            continue
+
+        url = f"http://localhost:{port}/v1"
+        backend_status = inspect_backend_readiness("llama.cpp", url)
+        if not backend_status.get("ok"):
+            print_warning_box(
+                backend_status["message"],
+                detail=backend_status.get("detail"),
+            )
+            retry_action = ask_backend_retry_or_back(
+                "llama.cpp backend check failed. Retry after fixing it, or go back? / "
+                "llama.cpp 後端檢查失敗。修正後要重試，還是返回上一階段？"
+            )
+            if retry_action is None:
+                return None
+            if retry_action in (BACK_ACTION, "back"):
+                return BACK_ACTION
+            port_default = port
+            continue
+
+        if backend_status.get("warning"):
+            print_warning_box(backend_status["warning"])
+
+        detected_models = backend_status.get("models", [])
+        suggested_models = ",".join(previous_models) if previous_models else ",".join(detected_models)
+        if not suggested_models:
+            suggested_models = "llama.cpp-model"
 
         model_names = ask_text_with_back(
             "Enter loaded model names (comma separated, for labeling only) / "
             "請輸入載入中的模型名稱（逗號分隔，僅供辨識）:",
-            default=",".join(previous_models) if previous_models else "llama.cpp-model",
+            default=suggested_models,
         )
         if model_names is None:
             return None
@@ -1772,8 +1973,8 @@ def select_models_and_url(backend, previous_url=None, previous_models=None):
 
         models = [name.strip() for name in (model_names or "").split(",") if name.strip()]
         if models:
-            return f"http://localhost:{port or '8080'}/v1", models
-        print("At least one model is required. / 至少需要一個模型名稱。")
+            return url, models
+        print("Please enter at least one model name. / 請至少輸入一個模型名稱。")
 
 
 def interactive_config():

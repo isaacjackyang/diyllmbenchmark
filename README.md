@@ -5,11 +5,13 @@
 - `Ollama`
 - `llama.cpp` 的 `llama-server`
 
-它會把你選的模型與參數組合逐一送測，量測串流輸出表現，最後產生報告、圖表、原始輸出與最佳設定摘要，適合用來比較不同模型或不同推論參數的實際效果。
+它會把你選的模型、`system prompt` 與參數組合逐一送測，量測串流輸出表現，最後產生報告、圖表、原始輸出與最佳設定摘要，適合用來比較不同模型、同模型下不同 `system prompt`，或同一個 `system prompt` 搭配不同推論參數的實際效果。
 
 ## 這個工具能做什麼
 
 - 比較多個模型在相同 prompt 下的表現
+- 比較同一個模型在不同 `system prompt` 下的表現
+- 比較同一個 `system prompt` 搭配不同參數組合時的差異
 - 比較不同參數組合對速度與輸出型態的影響
 - 支援兩種 benchmark 模式：
   - `chat`：一般文字回覆 benchmark
@@ -108,7 +110,7 @@ python3 -m venv .venv
 - 原 V3 / V5 的 benchmark / 圖表 / HTML report / JSONL raw outputs / best config 輸出
 - `Thinking TPS`、`Output TPS`、`Output/Thinking Ratio`
 - `tools` 模式下各模型的 tool call 成功次數與成功率摘要
-- 可把 `system prompt` 當成獨立測試維度，支援 `N/A`、固定數量或自訂數量，並用整頁編輯區直接貼上多段 prompt
+- 可把 `system prompt` 當成獨立測試維度，支援 `N/A`、固定數量或自訂數量，並用整頁編輯區直接貼上多段 prompt，方便做同模型不同 `system prompt` 的比較
 - 產出的 HTML 報告會用中英對照顯示主要段落、欄位與指標說明
 - HTML 報告中的結果卡片支援前端篩選，可勾選工具呼叫、thinking、有無 output、thinking mode 與狀態
 
@@ -164,6 +166,15 @@ python3 -m venv .venv
 `模型數量 x 參數組合數 x system prompt 變體數`
 
 如果沒有選任何參數，且 `system prompt` 也選 `N/A`，就只會以各模型目前預設設定各跑一次。
+
+常見的比較方式例如：
+
+- 同模型測不同 `system prompt`
+  - 只選 1 個模型，`system prompt` 輸入多個版本，參數維持 `N/A` 或固定值
+- 同 `system prompt` 測不同參數
+  - 固定 1 個 `system prompt`，只調整 `temperature`、`top_p`、`repeat_penalty` 等參數組合
+- 同時交叉比較 `system prompt` 與參數
+  - 程式會自動把 `system prompt` 變體與參數組合做完整笛卡兒積測試
 
 ## Benchmark 模式說明
 
