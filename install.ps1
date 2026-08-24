@@ -1,5 +1,6 @@
 param(
     [string]$PythonExe,
+    [string]$VenvPath = ".venv",
     [switch]$DryRun,
     [switch]$SkipPipUpgrade
 )
@@ -9,8 +10,13 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
-$entryScriptPath = Join-Path $projectRoot "expert_LLM_benchmark.py"
-$venvPath = Join-Path $projectRoot ".venv"
+$entryScriptPath = Join-Path $projectRoot "llm_expert_bench.py"
+$venvRoot = if ([System.IO.Path]::IsPathRooted($VenvPath)) {
+    $VenvPath
+} else {
+    Join-Path $projectRoot $VenvPath
+}
+$venvPythonPath = Join-Path $venvRoot "Scripts\python.exe"
 $runtimeCheckCode = @'
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
@@ -41,11 +47,28 @@ function Resolve-PythonExe {
     )
 
     if ($RequestedPythonExe) {
-        return $RequestedPythonExe
+        if (Test-PythonExe -Candidate $RequestedPythonExe) {
+            return $RequestedPythonExe
+        }
+        throw "The requested Python command could not run: $RequestedPythonExe"
     }
 
-    foreach ($candidate in @("py", "python")) {
-        if (Get-Command $candidate -ErrorAction SilentlyContinue) {
+    if (Get-Command "py" -ErrorAction SilentlyContinue) {
+        foreach ($versionSelector in @("-3.13", "-3.12", "-3.11", "-3.10", "-3")) {
+            try {
+                $launcherOutput = & py $versionSelector -c "import sys; print(sys.executable)" 2>$null
+                $launcherExitCode = $LASTEXITCODE
+                $resolvedPath = $launcherOutput | Select-Object -First 1
+                if ($launcherExitCode -eq 0 -and $resolvedPath -and (Test-PythonExe -Candidate $resolvedPath.Trim())) {
+                    return $resolvedPath.Trim()
+                }
+            } catch {
+            }
+        }
+    }
+
+    foreach ($candidate in @("python", "python3")) {
+        if (Test-PythonExe -Candidate $candidate) {
             return $candidate
         }
     }
@@ -53,28 +76,21 @@ function Resolve-PythonExe {
     throw "Python was not found. Install Python 3 first, then rerun this script."
 }
 
-function Get-VenvPythonPath {
+function Test-PythonExe {
     param(
-        [string]$VirtualEnvPath
+        [string]$Candidate
     )
 
-    if ($env:OS -eq "Windows_NT") {
-        return Join-Path $VirtualEnvPath "Scripts\python.exe"
+    if (-not (Get-Command $Candidate -ErrorAction SilentlyContinue)) {
+        return $false
     }
 
-    return Join-Path $VirtualEnvPath "bin/python"
-}
-
-function Get-VenvActivatePath {
-    param(
-        [string]$VirtualEnvPath
-    )
-
-    if ($env:OS -eq "Windows_NT") {
-        return Join-Path $VirtualEnvPath "Scripts\Activate.ps1"
+    try {
+        & $Candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
     }
-
-    return Join-Path $VirtualEnvPath "bin/activate"
 }
 
 function Format-Command {
@@ -83,13 +99,7 @@ function Format-Command {
         [string[]]$Arguments
     )
 
-    $formattedCommand = if ($Command -match "\s") {
-        '"' + $Command + '"'
-    } else {
-        $Command
-    }
-
-    $parts = @($formattedCommand) + ($Arguments | ForEach-Object {
+    $parts = @($Command) + ($Arguments | ForEach-Object {
         if ($_ -match "\s") {
             '"' + $_ + '"'
         } else {
@@ -129,41 +139,36 @@ if (-not (Test-Path $entryScriptPath)) {
     throw "Main entry script was not found at: $entryScriptPath"
 }
 
-$pythonCommand = Resolve-PythonExe -RequestedPythonExe $PythonExe
-$venvPython = Get-VenvPythonPath -VirtualEnvPath $venvPath
-$venvActivatePath = Get-VenvActivatePath -VirtualEnvPath $venvPath
+$basePythonCommand = Resolve-PythonExe -RequestedPythonExe $PythonExe
 
 Write-Host "Project root: $projectRoot"
 Write-Host "Requirements file: $requirementsPath"
 Write-Host "Entry script: $entryScriptPath"
-Write-Host "Virtual environment path: $venvPath"
-Write-Host "Using base Python command: $pythonCommand"
+Write-Host "Virtual environment: $venvRoot"
+Write-Host "Base Python: $basePythonCommand"
 
-Invoke-Step -Description "Show base Python interpreter" -Command $pythonCommand -Arguments @(
+Invoke-Step -Description "Show base Python interpreter" -Command $basePythonCommand -Arguments @(
     "-c",
     "import sys; print(sys.executable)"
 )
 
-if (-not (Test-Path $venvPath)) {
-    Invoke-Step -Description "Create project virtual environment" -Command $pythonCommand -Arguments @(
+if (-not (Test-Path -LiteralPath $venvPythonPath -PathType Leaf)) {
+    Invoke-Step -Description "Create project virtual environment" -Command $basePythonCommand -Arguments @(
         "-m",
         "venv",
-        $venvPath
+        $venvRoot
     )
-} else {
-    Write-Host ""
-    Write-Host "==> Reuse existing virtual environment"
-    Write-Host "    $venvPath"
 }
 
-if (-not $DryRun -and -not (Test-Path $venvPython)) {
-    throw "Virtual environment Python was not found at: $venvPython"
+if (-not $DryRun -and -not (Test-PythonExe -Candidate $venvPythonPath)) {
+    throw "The project virtual environment is invalid: $venvPythonPath"
 }
 
-Write-Host "Using virtual environment Python: $venvPython"
+$pythonCommand = $venvPythonPath
+Write-Host "Runtime Python: $pythonCommand"
 
 if (-not $SkipPipUpgrade) {
-    Invoke-Step -Description "Upgrade pip inside virtual environment" -Command $venvPython -Arguments @(
+    Invoke-Step -Description "Upgrade pip" -Command $pythonCommand -Arguments @(
         "-m",
         "pip",
         "install",
@@ -172,7 +177,7 @@ if (-not $SkipPipUpgrade) {
     )
 }
 
-Invoke-Step -Description "Install project dependencies into virtual environment" -Command $venvPython -Arguments @(
+Invoke-Step -Description "Install project dependencies" -Command $pythonCommand -Arguments @(
     "-m",
     "pip",
     "install",
@@ -180,16 +185,15 @@ Invoke-Step -Description "Install project dependencies into virtual environment"
     $requirementsPath
 )
 
-Invoke-Step -Description "Verify runtime imports inside virtual environment" -Command $venvPython -Arguments @(
+Invoke-Step -Description "Verify runtime imports" -Command $pythonCommand -Arguments @(
     "-c",
     $runtimeCheckCode
 )
 
 Write-Host ""
 if ($DryRun) {
-    Write-Host "Dry run complete. No virtual environment was created and no packages were installed."
+    Write-Host "Dry run complete. No packages were installed."
 } else {
-    Write-Host "Virtual environment setup and runtime verification complete."
+    Write-Host "Install and runtime verification complete."
 }
-Write-Host ("Next step (PowerShell): & '" + $venvActivatePath + "'")
-Write-Host ("Or run directly: & '" + $venvPython + "' '" + $entryScriptPath + "'")
+Write-Host "Next step: double-click 'llm_expert_bench.cmd', or run '.\.venv\Scripts\python.exe .\llm_expert_bench.py' from $projectRoot"
