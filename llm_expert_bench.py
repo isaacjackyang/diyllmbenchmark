@@ -1,11 +1,18 @@
+import copy
 import html
 import json
+import math
+import mimetypes
+import os
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 try:
     from importlib.metadata import PackageNotFoundError, version as get_package_version
 except Exception:
@@ -17,8 +24,18 @@ except Exception:
 
 from itertools import product
 from pathlib import Path
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 DEPENDENCY_IMPORT_ERRORS = {}
+DEFAULT_UI_HOST = "127.0.0.1"
+DEFAULT_UI_PORT = 8765
+DEFAULT_UI_PORT_SCAN_LIMIT = 10
+UI_LAUNCH_HINT_FILENAME = "llm_expert_bench_ui_url.txt"
+LOCAL_EXPERT_BATTLE_SUITE_ID = "local-expert-battle-48"
+LOCAL_EXPERT_BATTLE_FILENAME = "local_expert_battle.json"
+LOCAL_EXPERT_WIKI_DIR_ENV = "DIY_LLM_WIKI_DIR"
+LLAMA_CPP_LAUNCHER_ROOT_ENV = "DIY_LLAMACPP_ROOT"
+CURRENT_LLAMA_CPP_MODEL_FALLBACK = "current-llama.cpp-model"
 
 try:
     import matplotlib.pyplot as plt
@@ -98,14 +115,6 @@ PARAM_INFO = {
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "top_p", "llama.cpp": "top_p"},
     },
-    "top_k": {
-        "label": "Top-K 候選數",
-        "range": "0 - 200",
-        "desc": "限制只從前 K 個高機率 token 中取樣；llama.cpp 常用 40 左右。",
-        "default": "20, 40",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "top_k"},
-    },
     "min_p": {
         "label": "最小概率 (Min_P)",
         "range": "0.0 - 1.0",
@@ -114,30 +123,6 @@ PARAM_INFO = {
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "min_p", "llama.cpp": "min_p"},
     },
-    "typical_p": {
-        "label": "局部典型採樣 (Typical_P)",
-        "range": "0.0 - 1.0",
-        "desc": "llama.cpp 的 locally typical sampling；1.0 代表關閉。",
-        "default": "1.0, 0.95",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "typical_p"},
-    },
-    "dynatemp_range": {
-        "label": "動態溫度範圍 (Dynatemp Range)",
-        "range": "0.0 - 2.0",
-        "desc": "讓實際溫度在 temperature 上下浮動；0.0 代表關閉。",
-        "default": "0.0, 0.5",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dynatemp_range"},
-    },
-    "dynatemp_exponent": {
-        "label": "動態溫度指數 (Dynatemp Exponent)",
-        "range": "0.0 - 5.0",
-        "desc": "調整 dynatemp 的變化曲線；通常搭配 dynatemp_range 一起測。",
-        "default": "1.0, 2.0",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dynatemp_exponent"},
-    },
     "repeat_penalty": {
         "label": "重複懲罰 (Repeat Penalty)",
         "range": "1.0 - 2.0",
@@ -145,103 +130,6 @@ PARAM_INFO = {
         "default": "1.05, 1.15",
         "backends": ["ollama", "llama.cpp"],
         "backend_keys": {"ollama": "repeat_penalty", "llama.cpp": "repeat_penalty"},
-    },
-    "repeat_last_n": {
-        "label": "重複檢查視窗 (Repeat Last N)",
-        "range": "-1, 0 - 4096",
-        "desc": "llama.cpp 重複懲罰要回看多少 token；-1 代表使用 context size。",
-        "default": "64, 256",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "repeat_last_n"},
-    },
-    "presence_penalty": {
-        "label": "出現懲罰 (Presence Penalty)",
-        "range": "-2.0 - 2.0",
-        "desc": "降低已出現過主題再次被選中的機率；0.0 代表關閉。",
-        "default": "0.0, 0.5",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "presence_penalty"},
-    },
-    "frequency_penalty": {
-        "label": "頻率懲罰 (Frequency Penalty)",
-        "range": "-2.0 - 2.0",
-        "desc": "依出現次數加重懲罰，能更明顯壓制重複 token。",
-        "default": "0.0, 0.5",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "frequency_penalty"},
-    },
-    "dry_multiplier": {
-        "label": "DRY 倍率 (Dry Multiplier)",
-        "range": "0.0 - 2.0",
-        "desc": "Don't Repeat Yourself 懲罰強度；0.0 代表關閉。",
-        "default": "0.0, 0.8",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dry_multiplier"},
-    },
-    "dry_base": {
-        "label": "DRY 基底 (Dry Base)",
-        "range": "1.0 - 4.0",
-        "desc": "DRY 懲罰成長基底，數值越大重複延伸時罰得越快。",
-        "default": "1.75, 2.0",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dry_base"},
-    },
-    "dry_allowed_length": {
-        "label": "DRY 容許長度 (Dry Allowed Length)",
-        "range": "0 - 32",
-        "desc": "重複片段在多長之前不加重 DRY 懲罰。",
-        "default": "2, 4",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dry_allowed_length"},
-    },
-    "dry_penalty_last_n": {
-        "label": "DRY 回看視窗 (Dry Penalty Last N)",
-        "range": "-1, 0 - 4096",
-        "desc": "DRY 要掃描多少 token；-1 代表使用 context size。",
-        "default": "-1, 256",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "dry_penalty_last_n"},
-    },
-    "mirostat": {
-        "label": "Mirostat 模式",
-        "range": "0, 1, 2",
-        "desc": "llama.cpp 的 Mirostat 採樣；0 關閉，1/2 為不同版本。",
-        "default": "0, 2",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "mirostat"},
-    },
-    "mirostat_tau": {
-        "label": "Mirostat 熵目標 (Tau)",
-        "range": "0.0 - 10.0",
-        "desc": "Mirostat 目標熵；越高通常越發散。",
-        "default": "5.0, 8.0",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "mirostat_tau"},
-    },
-    "mirostat_eta": {
-        "label": "Mirostat 學習率 (Eta)",
-        "range": "0.01 - 1.0",
-        "desc": "Mirostat 調整速度；越大反應越激進。",
-        "default": "0.1, 0.3",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "mirostat_eta"},
-    },
-    "seed": {
-        "label": "隨機種子 (Seed)",
-        "range": "-1, 0 - 2147483647",
-        "desc": "固定後可重現結果；-1 代表每次使用隨機 seed。",
-        "default": "-1, 42",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "seed"},
-    },
-    "ignore_eos": {
-        "label": "忽略 EOS (Ignore EOS)",
-        "range": "enable | disable",
-        "desc": "忽略結束 token 持續生成；通常只建議在特定壓測時使用。",
-        "default": "disable, enable",
-        "value_type": "boolean",
-        "backends": ["llama.cpp"],
-        "backend_keys": {"llama.cpp": "ignore_eos"},
     },
     "num_gpu": {
         "label": "GPU 層數 / 顯存卸載",
@@ -264,34 +152,8 @@ PARAM_INFO = {
 }
 
 PARAM_GROUPS = {
-    "🔥 生成核心": [
-        "temperature",
-        "num_ctx",
-        "num_predict",
-        "top_p",
-        "top_k",
-        "min_p",
-        "typical_p",
-        "dynatemp_range",
-        "dynatemp_exponent",
-    ],
-    "⚖️ 採樣與懲罰": [
-        "repeat_penalty",
-        "repeat_last_n",
-        "presence_penalty",
-        "frequency_penalty",
-        "dry_multiplier",
-        "dry_base",
-        "dry_allowed_length",
-        "dry_penalty_last_n",
-    ],
-    "🌀 採樣策略與控制": [
-        "mirostat",
-        "mirostat_tau",
-        "mirostat_eta",
-        "seed",
-        "ignore_eos",
-    ],
+    "🔥 生成核心": ["temperature", "num_ctx", "num_predict"],
+    "⚖️ 採樣與懲罰": ["top_p", "min_p", "repeat_penalty"],
     "🧠 Thinking / Reasoning": ["enable_thinking"],
     "🖥️ 硬體與部署": ["num_gpu"],
 }
@@ -315,6 +177,235 @@ CAPABILITY_OPTIONS = {
         ),
     },
 }
+
+
+SUITE_QUESTION_REQUIRED_FIELDS = (
+    "id",
+    "category",
+    "title",
+    "prompt",
+    "expected_output",
+    "evaluation_guide",
+)
+
+SUITE_SMOKE_7 = {
+    "id": "suite-smoke-7",
+    "version": "1.0.0",
+    "title": "Seven-skill smoke suite / 七項能力冒煙測試",
+    "description": (
+        "One fixed question each for math, logic, reasoning, reading, translation, "
+        "writing, and coding. / 數學、邏輯、推理、閱讀、翻譯、寫作與程式各一題。"
+    ),
+    "question_schema": {
+        "id": "Stable question identifier / 穩定題目識別碼",
+        "category": "Machine-readable skill category / 機器可讀能力分類",
+        "title": "Bilingual short title / 中英雙語短標題",
+        "prompt": "Complete user prompt sent to the model / 實際送給模型的完整提示",
+        "expected_output": "Reference answer or expected response shape / 參考答案或預期輸出形式",
+        "evaluation_guide": "Manual or future automatic scoring guidance / 人工或未來自動評分準則",
+    },
+    "questions": [
+        {
+            "id": "smoke7-math-01",
+            "category": "math",
+            "title": "Discount and tax / 折扣與稅額",
+            "prompt": (
+                "一件商品原價 800 元，先打 85 折，再針對折後價格加收 5% 稅金。"
+                "請列出計算式，並以兩位小數給出最後應付金額。"
+            ),
+            "expected_output": "800 × 0.85 × 1.05 = 714.00 元。",
+            "evaluation_guide": "The calculation and final amount 714.00 must both be correct.",
+        },
+        {
+            "id": "smoke7-logic-01",
+            "category": "logic",
+            "title": "Truth-teller puzzle / 誠實者邏輯題",
+            "prompt": (
+                "A 說：「B 在說謊。」B 說：「我們兩個都在說謊。」已知每個人不是永遠說真話，"
+                "就是永遠說假話。請判斷 A、B 各是哪一種人，並用兩句話說明理由。"
+            ),
+            "expected_output": "A 說真話，B 說假話。",
+            "evaluation_guide": "The conclusion must be A truthful and B lying, with a consistent explanation.",
+        },
+        {
+            "id": "smoke7-reasoning-01",
+            "category": "reasoning",
+            "title": "Access-chain reasoning / 權限鏈推理",
+            "prompt": (
+                "所有金屬鑰匙都放在紅盒中；紅盒放在上鎖的櫃子裡。小美可以進入放置櫃子的房間，"
+                "但經理不在場時不能打開任何上鎖物件。今天經理不在。小美今天能拿到金屬鑰匙嗎？"
+                "請依條件逐步回答，不要加入題目沒有提供的假設。"
+            ),
+            "expected_output": "不能；她雖能進房間，但無權打開上鎖的櫃子，因此無法取得紅盒內鑰匙。",
+            "evaluation_guide": "The answer must be no and connect room access, the locked cabinet, and manager absence.",
+        },
+        {
+            "id": "smoke7-reading-01",
+            "category": "reading",
+            "title": "Short-passage comprehension / 短文理解",
+            "prompt": (
+                "閱讀短文：『工廠把夜間冷卻水泵改為依溫度自動調速後，用電量下降 18%。"
+                "不過在第一週，兩次溫度感測器誤報讓泵浦全速運轉。工程團隊因此加入雙感測器交叉驗證，"
+                "之後四週沒有再發生誤報。』請回答：(1) 用電量下降的直接原因是什麼？"
+                "(2) 團隊為何加入雙感測器交叉驗證？每題各用一句話。"
+            ),
+            "expected_output": "(1) 水泵改為依溫度自動調速。(2) 為避免單一感測器誤報使泵浦全速運轉。",
+            "evaluation_guide": "Both answers must be grounded only in the passage and preserve the causal relationship.",
+        },
+        {
+            "id": "smoke7-translation-01",
+            "category": "translation",
+            "title": "Technical translation / 技術翻譯",
+            "prompt": (
+                "請把下列繁體中文翻譯成自然、精確的英文，只輸出譯文；保留 GPU、24 GB 與 128k context "
+                "三個技術標記不變：『這張 GPU 有 24 GB 記憶體，但啟用 128k context 時仍須留意 KV cache 的成長。』"
+            ),
+            "expected_output": (
+                "This GPU has 24 GB of memory, but KV cache growth still needs to be monitored "
+                "when 128k context is enabled."
+            ),
+            "evaluation_guide": "Meaning must be accurate, English natural, and all three required markers preserved.",
+        },
+        {
+            "id": "smoke7-writing-01",
+            "category": "writing",
+            "title": "Concise professional writing / 精簡商務寫作",
+            "prompt": (
+                "請用繁體中文寫一封簡短專業郵件，通知團隊明天下午 3 點的模型部署延後到後天下午 2 點。"
+                "內容必須包含主旨、延後原因是『驗證尚未完成』、向收件者致歉，以及請大家回覆是否能配合新時間。"
+                "全文控制在 120 個中文字以內。"
+            ),
+            "expected_output": "A concise Traditional Chinese email containing all four required elements and the new time.",
+            "evaluation_guide": "Check subject, both times, stated reason, apology, reply request, tone, and length constraint.",
+        },
+        {
+            "id": "smoke7-coding-01",
+            "category": "coding",
+            "title": "Order-preserving deduplication / 保序去重",
+            "prompt": (
+                "請用 Python 實作 `dedupe_keep_order(items)`：移除重複項目但保留第一次出現的順序，"
+                "時間複雜度需為 O(n)。請提供型別標註、函式本體與一個輸入輸出範例，不要使用外部套件。"
+            ),
+            "expected_output": "A valid O(n) Python implementation using a seen set plus an ordered result list.",
+            "evaluation_guide": "Code must be valid, preserve first occurrence order, use type hints, and include one example.",
+        },
+    ],
+}
+
+BUILTIN_SUITES = {SUITE_SMOKE_7["id"]: SUITE_SMOKE_7}
+
+
+def get_local_expert_battle_definition():
+    """Load the repository-managed battle set without baking private wiki text into git."""
+    suite_path = Path(__file__).with_name(LOCAL_EXPERT_BATTLE_FILENAME)
+    try:
+        with suite_path.open("r", encoding="utf-8") as file:
+            suite = json.load(file)
+    except FileNotFoundError as exc:
+        raise ValueError(f"Local Expert Battle test set is missing: {suite_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid Local Expert Battle test set: {exc}") from exc
+
+    if suite.get("id") != LOCAL_EXPERT_BATTLE_SUITE_ID:
+        raise ValueError(f"Unexpected Local Expert Battle suite id: {suite.get('id')}")
+    return suite
+
+
+def get_local_expert_wiki_root():
+    configured_path = os.environ.get(LOCAL_EXPERT_WIKI_DIR_ENV, "").strip()
+    return Path(configured_path).expanduser() if configured_path else Path.home() / "wiki"
+
+
+def load_local_expert_wiki_excerpt(question):
+    source_name = str(question.get("wiki_source") or "").strip()
+    if not source_name:
+        return "", "", 0
+
+    wiki_root = get_local_expert_wiki_root()
+    source_path = (wiki_root / source_name).resolve()
+    try:
+        source_path.relative_to(wiki_root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"Wiki source must remain inside {wiki_root}: {source_name}") from exc
+    if not source_path.is_file():
+        raise ValueError(
+            f"Wiki source is unavailable: {source_path}. Set {LOCAL_EXPERT_WIKI_DIR_ENV} to your wiki directory."
+        )
+
+    content = source_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    start = max(0, int(question.get("wiki_excerpt_start") or 0))
+    excerpt = content[start : start + 2400].strip()
+    if len(excerpt) < 2000:
+        # A shorter final segment is still useful, but make the evidence limitation explicit to the reviewer.
+        excerpt = content[max(0, len(content) - 2400) :].strip()
+    if len(excerpt) < 1200:
+        raise ValueError(f"Wiki source is too short for a long-summary test: {source_path}")
+    return excerpt, source_path.as_posix(), len(excerpt)
+
+
+def hydrate_local_expert_battle_suite(suite):
+    hydrated = copy.deepcopy(suite)
+    for question in hydrated.get("questions") or []:
+        template = question.pop("prompt_template", "")
+        if template:
+            excerpt, source_path, excerpt_chars = load_local_expert_wiki_excerpt(question)
+            question["prompt"] = str(template).format(excerpt=excerpt)
+            question["wiki_source_path"] = source_path
+            question["wiki_excerpt_chars"] = excerpt_chars
+    return hydrated
+
+
+def get_suite_definition(suite_id):
+    suite = (
+        hydrate_local_expert_battle_suite(get_local_expert_battle_definition())
+        if suite_id == LOCAL_EXPERT_BATTLE_SUITE_ID
+        else BUILTIN_SUITES.get(suite_id)
+    )
+    if suite is None:
+        raise ValueError(f"Unknown benchmark suite: {suite_id}")
+
+    questions = suite.get("questions") or []
+    if not questions:
+        raise ValueError(f"Benchmark suite has no questions: {suite_id}")
+
+    question_ids = set()
+    for question in questions:
+        missing_fields = [field for field in SUITE_QUESTION_REQUIRED_FIELDS if not question.get(field)]
+        if missing_fields:
+            raise ValueError(
+                f"Question in {suite_id} is missing required fields: {', '.join(missing_fields)}"
+            )
+        if question["id"] in question_ids:
+            raise ValueError(f"Duplicate question id in {suite_id}: {question['id']}")
+        question_ids.add(question["id"])
+    return copy.deepcopy(suite)
+
+
+def resolve_benchmark_questions(config):
+    capability = config.get("capability", "chat")
+    if capability in BUILTIN_SUITES or capability == LOCAL_EXPERT_BATTLE_SUITE_ID:
+        suite = get_suite_definition(capability)
+        return [
+            {
+                "suite_id": suite["id"],
+                "suite_version": suite["version"],
+                **question,
+            }
+            for question in suite["questions"]
+        ]
+
+    return [
+        {
+            "suite_id": "",
+            "suite_version": "",
+            "id": "",
+            "category": "",
+            "title": "",
+            "prompt": str(config.get("prompt", "")),
+            "expected_output": "",
+            "evaluation_guide": "",
+        }
+    ]
 
 TOOL_BENCHMARK_TOOLS = [
     {
@@ -342,154 +433,184 @@ TOOL_BENCHMARK_TOOLS = [
 ]
 
 
-OLLAMA_HOST = "http://localhost:11434"
-OLLAMA_BASE_URL = f"{OLLAMA_HOST}/v1"
-DEFAULT_LLAMA_PORT = "8080"
-BACKEND_CHECK_TIMEOUT_S = 3
-BACKEND_LABELS = {
-    "ollama": "Ollama",
-    "llama.cpp": "llama.cpp (llama-server)",
-}
-
-
-def get_backend_display_name(backend):
-    return BACKEND_LABELS.get(backend, backend)
-
-
-def normalize_local_port(raw_port, default=DEFAULT_LLAMA_PORT):
-    port_text = str(raw_port or default).strip() or default
-    if not port_text.isdigit():
-        return None, "Please enter a whole-number port between 1 and 65535. / 請輸入 1 到 65535 之間的整數端口。"
-
-    port_number = int(port_text)
-    if not 1 <= port_number <= 65535:
-        return None, "The port must be between 1 and 65535. / 端口必須介於 1 到 65535 之間。"
-    return str(port_number), None
-
-
-def inspect_backend_readiness(backend, url):
-    if backend == "ollama":
-        tags_url = f"{OLLAMA_HOST}/api/tags"
-        try:
-            response = requests.get(tags_url, timeout=BACKEND_CHECK_TIMEOUT_S)
-            response.raise_for_status()
-            payload = response.json()
-        except requests.RequestException as exc:
-            return {
-                "ok": False,
-                "models": [],
-                "message": (
-                    f"Unable to connect to Ollama at {OLLAMA_HOST}. Please start `ollama serve` first, then retry. / "
-                    f"無法連線到 {OLLAMA_HOST} 的 Ollama，請先啟動 `ollama serve`，再回來重試。"
-                ),
-                "detail": f"{type(exc).__name__}: {exc}",
-            }
-        except ValueError as exc:
-            return {
-                "ok": False,
-                "models": [],
-                "message": (
-                    f"Ollama responded, but {tags_url} did not return valid JSON. / "
-                    f"Ollama 有回應，但 {tags_url} 回傳的不是有效 JSON。"
-                ),
-                "detail": f"{type(exc).__name__}: {exc}",
-            }
-
-        if not isinstance(payload, dict):
-            return {
-                "ok": False,
-                "models": [],
-                "message": (
-                    f"Ollama responded, but the payload from {tags_url} was not in the expected format. / "
-                    f"Ollama 有回應，但 {tags_url} 的回傳格式不符合預期。"
-                ),
-                "detail": f"payload type: {type(payload).__name__}",
-            }
-
-        models = [model["name"] for model in payload.get("models", []) if model.get("name")]
-        warning = None
-        if not models:
-            warning = (
-                "Ollama is reachable, but `/api/tags` did not report any models. You can still type model names "
-                "manually, but the benchmark will fail if those models are not installed locally. / "
-                "Ollama 可正常連線，但 `/api/tags` 沒有回報任何模型。你仍可手動輸入模型名稱；若本機沒有"
-                "安裝那些模型，benchmark 還是會失敗。"
-            )
-        return {"ok": True, "models": models, "warning": warning, "checked_url": tags_url}
-
-    models_url = f"{url.rstrip('/')}/models"
+def get_ollama_models():
     try:
-        response = requests.get(models_url, timeout=BACKEND_CHECK_TIMEOUT_S)
+        response = requests.get("http://localhost:11434/api/tags", timeout=2)
+        response.raise_for_status()
+        models = response.json().get("models", [])
+        return [model["name"] for model in models if model.get("name")]
+    except requests.RequestException:
+        return []
+
+
+def get_openai_compatible_models(base_url, timeout_seconds=3):
+    """Return model IDs currently served by an OpenAI-compatible endpoint."""
+    models_url = str(base_url).rstrip("/") + "/models"
+    try:
+        response = requests.get(models_url, timeout=timeout_seconds)
         response.raise_for_status()
         payload = response.json()
-    except requests.RequestException as exc:
-        return {
-            "ok": False,
-            "models": [],
-            "message": (
-                f"Unable to connect to the llama.cpp OpenAI-compatible endpoint at {models_url}. "
-                f"Please start `llama-server` on that port first, then retry. / 無法連線到 {models_url} 的 "
-                f"llama.cpp OpenAI 相容端點，請先在該端口啟動 `llama-server`，再回來重試。"
-            ),
-            "detail": f"{type(exc).__name__}: {exc}",
-        }
-    except ValueError as exc:
-        return {
-            "ok": False,
-            "models": [],
-            "message": (
-                f"The backend responded, but {models_url} did not return valid JSON. / "
-                f"後端有回應，但 {models_url} 回傳的不是有效 JSON。"
-            ),
-            "detail": f"{type(exc).__name__}: {exc}",
-        }
+    except (requests.RequestException, ValueError, TypeError):
+        return []
 
-    if not isinstance(payload, dict):
-        return {
-            "ok": False,
-            "models": [],
-            "message": (
-                f"The backend responded, but the `/v1/models` payload from {models_url} was not in the expected "
-                f"format. / 後端有回應，但 {models_url} 的 `/v1/models` 回傳格式不符合預期。"
-            ),
-            "detail": f"payload type: {type(payload).__name__}",
-        }
-
-    data = payload.get("data", [])
-    if not isinstance(data, list):
-        return {
-            "ok": False,
-            "models": [],
-            "message": (
-                f"The backend responded, but the `/v1/models` payload from {models_url} was not in the expected "
-                f"format. / 後端有回應，但 {models_url} 的 `/v1/models` 回傳格式不符合預期。"
-            ),
-            "detail": f"payload keys: {', '.join(sorted(payload.keys()))}",
-        }
-
-    models = []
-    for item in data:
+    seen = set()
+    model_ids = []
+    for item in payload.get("data") or []:
         if not isinstance(item, dict):
             continue
         model_id = str(item.get("id") or "").strip()
-        if model_id:
-            models.append(model_id)
-
-    warning = None
-    if not models:
-        warning = (
-            "The backend is reachable, but `/v1/models` did not report any model IDs. Please confirm the loaded "
-            "model name before benchmarking. / 後端可正常連線，但 `/v1/models` 沒有回報任何模型 ID；"
-            "開始 benchmark 前請先確認實際載入中的模型名稱。"
-        )
-    return {"ok": True, "models": models, "warning": warning, "checked_url": models_url}
+        normalized_id = model_id.casefold()
+        if not model_id or normalized_id in seen:
+            continue
+        seen.add(normalized_id)
+        model_ids.append(model_id)
+    return model_ids
 
 
-def get_ollama_models():
-    backend_status = inspect_backend_readiness("ollama", OLLAMA_BASE_URL)
-    if not backend_status.get("ok"):
+def get_llama_cpp_launcher_root():
+    configured_path = os.environ.get(LLAMA_CPP_LAUNCHER_ROOT_ENV, "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser()
+    return Path(__file__).resolve().parent.parent / "easy_llamacpp"
+
+
+def get_llama_cpp_models():
+    """Read the catalog refreshed by easy_llamacpp's configured GGUF scanner."""
+    launcher_root = get_llama_cpp_launcher_root()
+    index_path = launcher_root / "json" / "model-index.json"
+    try:
+        with index_path.open("r", encoding="utf-8-sig") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
         return []
-    return backend_status.get("models", [])
+
+    default_model_id = str(payload.get("default_model_id") or "")
+    catalog = []
+    seen_names = set()
+    for item in payload.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        model_path = str(item.get("path") or "").strip()
+        model_name = str(item.get("name") or Path(model_path).stem).strip()
+        normalized_name = model_name.casefold()
+        path_name = Path(model_path).name.casefold()
+        if (
+            not model_name
+            or not model_path.casefold().endswith(".gguf")
+            or normalized_name in seen_names
+            or "mmproj" in normalized_name
+            or "mmproj" in path_name
+        ):
+            continue
+        seen_names.add(normalized_name)
+        catalog.append(
+            {
+                "name": model_name,
+                "path": model_path,
+                "id": str(item.get("id") or ""),
+                "available": Path(model_path).is_file(),
+                "is_default": str(item.get("id") or "") == default_model_id,
+            }
+        )
+
+    return sorted(catalog, key=lambda item: (not item["is_default"], item["name"].casefold()))
+
+
+def resolve_llama_cpp_auto_switch_models(model_names):
+    catalog_by_name = {item["name"].casefold(): item for item in get_llama_cpp_models()}
+    resolved_models = []
+    missing_models = []
+    unavailable_models = []
+    for model_name in model_names:
+        model_entry = catalog_by_name.get(str(model_name).casefold())
+        if model_entry is None:
+            missing_models.append(str(model_name))
+            continue
+        if not model_entry.get("available"):
+            unavailable_models.append(str(model_name))
+            continue
+        resolved_models.append(model_entry)
+    if missing_models:
+        raise ValueError(
+            "Selected llama.cpp model(s) are not in easy_llamacpp model-index.json: "
+            + ", ".join(missing_models)
+        )
+    if unavailable_models:
+        raise ValueError(
+            "Selected GGUF file(s) are missing on disk: " + ", ".join(unavailable_models)
+        )
+    return resolved_models
+
+
+def get_llama_cpp_switch_port(base_url):
+    parsed = urlparse(str(base_url))
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ValueError("Auto-switch only supports a local llama.cpp URL (localhost or 127.0.0.1).")
+    return parsed.port or 80
+
+
+def start_llama_cpp_model(model_entry, base_url, ready_timeout_seconds=240):
+    launcher_root = get_llama_cpp_launcher_root()
+    launcher_script = launcher_root / "PS1" / "Start_LCPP.ps1"
+    if not launcher_script.is_file():
+        raise RuntimeError(f"easy_llamacpp launcher is missing: {launcher_script}")
+    model_path = Path(str(model_entry.get("path") or ""))
+    if not model_path.is_file():
+        raise RuntimeError(f"Selected GGUF is missing: {model_path}")
+
+    port = get_llama_cpp_switch_port(base_url)
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher_script),
+            "-BypassMenu",
+            "-Background",
+            "-NoBrowser",
+            "-NoPause",
+            "-ReturnNonZeroOnError",
+            "-Port",
+            str(port),
+            "-ModelPath",
+            str(model_path),
+        ],
+        cwd=str(launcher_root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(detail or f"easy_llamacpp failed to start {model_entry['name']}")
+
+    expected_ids = {str(model_entry.get("name") or "").casefold(), model_path.stem.casefold()}
+    models_url = str(base_url).rstrip("/") + "/models"
+    deadline = time.monotonic() + max(1, int(ready_timeout_seconds))
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(models_url, timeout=3)
+            response.raise_for_status()
+            payload = response.json()
+            served_ids = {
+                str(item.get("id") or "").casefold()
+                for item in payload.get("data", [])
+                if isinstance(item, dict)
+            }
+            if expected_ids & served_ids:
+                return
+            last_error = "llama-server is responding with a different model"
+        except (requests.RequestException, ValueError) as exc:
+            last_error = str(exc)
+        time.sleep(1)
+    raise RuntimeError(
+        f"Timed out waiting for {model_entry['name']} at {models_url}. "
+        f"Last status: {last_error or 'no response'}"
+    )
 
 
 BOOLEAN_TRUE_ALIASES = {
@@ -702,14 +823,17 @@ def build_benchmark_messages(capability, prompt, system_prompt_text=""):
     return messages
 
 
-def build_chat_request_payload(config, model, request_kwargs, system_prompt_text=""):
+def build_chat_request_payload(config, model, request_kwargs, system_prompt_text="", prompt=None):
     capability = config.get("capability", "chat")
+    request_prompt = config["prompt"] if prompt is None else prompt
     payload = {
         "model": model,
-        "messages": build_benchmark_messages(capability, config["prompt"], system_prompt_text),
+        "messages": build_benchmark_messages(capability, request_prompt, system_prompt_text),
         "stream": True,
         **request_kwargs,
     }
+    if config.get("backend") == "ollama":
+        payload["stream_options"] = {"include_usage": True}
     if capability == "tools":
         payload["tools"] = TOOL_BENCHMARK_TOOLS
         payload["tool_choice"] = "auto"
@@ -825,6 +949,17 @@ def format_text_value(value, default="N/A"):
     return text or default
 
 
+def format_token_count(value, default="N/A"):
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def calculate_efficiency_score(tps, vram_peak_mib):
     if tps is None or pd.isna(tps):
         return None
@@ -834,8 +969,69 @@ def calculate_efficiency_score(tps, vram_peak_mib):
     return round(score, 3)
 
 
-def calculate_text_tps(char_count, first_text_time, end_time):
-    if char_count is None or pd.isna(char_count) or char_count <= 0:
+TOKEN_ESTIMATE_PATTERN = re.compile(
+    r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]"
+    r"|[A-Za-z0-9]+(?:['._:/-][A-Za-z0-9]+)*"
+    r"|[^\s]"
+)
+
+
+def estimate_token_count(text):
+    normalized_text = normalize_text_content(text)
+    if not normalized_text:
+        return 0
+    return len(TOKEN_ESTIMATE_PATTERN.findall(normalized_text))
+
+
+def parse_optional_int(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return int(float(text))
+        except ValueError:
+            return None
+
+
+def convert_ns_to_seconds(value):
+    numeric_value = parse_optional_int(value)
+    if numeric_value is None:
+        return None
+    if numeric_value <= 0:
+        return 0.0
+    return round(numeric_value / 1_000_000_000, 6)
+
+
+def calculate_duration_tps(unit_count, duration_seconds):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
+        return None
+    if duration_seconds is None or pd.isna(duration_seconds):
+        return None
+    if duration_seconds <= 0:
+        return 0.0
+    return round(unit_count / duration_seconds, 2)
+
+
+def calculate_text_tps(unit_count, first_text_time, end_time):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -843,31 +1039,11 @@ def calculate_text_tps(char_count, first_text_time, end_time):
     generation_time = end_time - first_text_time
     if generation_time <= 0:
         return 0.0
-    return round(char_count / generation_time, 2)
+    return round(unit_count / generation_time, 2)
 
 
-def calculate_tps_from_duration(value_count, duration_seconds):
-    if value_count is None or pd.isna(value_count) or value_count <= 0:
-        return None
-    if duration_seconds is None:
-        return None
-    if duration_seconds <= 0:
-        return 0.0
-    return round(value_count / duration_seconds, 2)
-
-
-def calculate_duration_seconds(start_time, end_time):
-    if start_time is None or end_time is None:
-        return None
-
-    duration_seconds = end_time - start_time
-    if duration_seconds <= 0:
-        return 0.0
-    return round(duration_seconds, 3)
-
-
-def calculate_text_duration(char_count, first_text_time, end_time):
-    if char_count is None or pd.isna(char_count) or char_count <= 0:
+def calculate_text_duration(unit_count, first_text_time, end_time):
+    if unit_count is None or pd.isna(unit_count) or unit_count <= 0:
         return None
     if first_text_time is None or end_time is None:
         return None
@@ -878,11 +1054,13 @@ def calculate_text_duration(char_count, first_text_time, end_time):
     return round(generation_time, 3)
 
 
-def pick_earliest_time(*timestamps):
-    valid_timestamps = [timestamp for timestamp in timestamps if timestamp is not None]
-    if not valid_timestamps:
+def calculate_phase_time(start_time, end_time):
+    if start_time is None or end_time is None:
         return None
-    return min(valid_timestamps)
+    duration = end_time - start_time
+    if duration <= 0:
+        return 0.0
+    return round(duration, 3)
 
 
 def calculate_output_thinking_ratio(output_chars, thinking_chars):
@@ -911,48 +1089,27 @@ def normalize_text_content(value):
     return str(value)
 
 
-# Model-agnostic token estimate used for relative throughput comparisons.
-ESTIMATED_TOKEN_SEGMENT_PATTERN = re.compile(
-    r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]|"
-    r"[A-Za-z0-9]+(?:[._:/+-][A-Za-z0-9]+)*|"
-    r"[^\s]",
-    re.UNICODE,
-)
-ASCII_TOKEN_RUN_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:[._:/+-][A-Za-z0-9]+)*$")
-
-
-def estimate_token_count(value):
-    text = normalize_text_content(value)
-    if not text:
-        return 0
-
-    token_count = 0
-    for segment in ESTIMATED_TOKEN_SEGMENT_PATTERN.findall(text):
-        if ASCII_TOKEN_RUN_PATTERN.fullmatch(segment):
-            token_count += max(1, (len(segment) + 4) // 5)
-        else:
-            token_count += 1
-    return token_count
-
-
-def extract_delta_payload(delta):
-    if delta is None:
+def extract_object_payload(raw_object):
+    if raw_object is None:
         return {}
 
-    if isinstance(delta, dict):
-        raw_payload = delta
-    elif hasattr(delta, "model_dump"):
+    if isinstance(raw_object, dict):
+        raw_payload = raw_object
+    elif hasattr(raw_object, "model_dump"):
         try:
-            raw_payload = delta.model_dump(exclude_none=True)
+            raw_payload = raw_object.model_dump(exclude_none=True)
         except TypeError:
-            raw_payload = delta.model_dump()
-    elif hasattr(delta, "dict"):
+            raw_payload = raw_object.model_dump()
+    elif hasattr(raw_object, "dict"):
         try:
-            raw_payload = delta.dict(exclude_none=True)
+            raw_payload = raw_object.dict(exclude_none=True)
         except TypeError:
-            raw_payload = delta.dict()
+            raw_payload = raw_object.dict()
     else:
-        raw_payload = vars(delta)
+        try:
+            raw_payload = vars(raw_object)
+        except TypeError:
+            return {}
 
     payload = {}
     for key, value in raw_payload.items():
@@ -965,6 +1122,39 @@ def extract_delta_payload(delta):
         payload[key] = value
 
     return payload
+
+
+def extract_delta_payload(delta):
+    return extract_object_payload(delta)
+
+
+def extract_stream_usage_metrics(chunk):
+    payload = extract_object_payload(chunk)
+    usage_payload = extract_object_payload(payload.get("usage") or getattr(chunk, "usage", None))
+
+    prompt_tokens = parse_optional_int(usage_payload.get("prompt_tokens"))
+    completion_tokens = parse_optional_int(usage_payload.get("completion_tokens"))
+    total_tokens = parse_optional_int(usage_payload.get("total_tokens"))
+    prompt_eval_count = parse_optional_int(payload.get("prompt_eval_count"))
+    eval_count = parse_optional_int(payload.get("eval_count"))
+
+    prompt_token_value = prompt_tokens if prompt_tokens is not None else prompt_eval_count
+    completion_token_value = completion_tokens if completion_tokens is not None else eval_count
+    total_token_value = total_tokens
+    if total_token_value is None and prompt_token_value is not None and completion_token_value is not None:
+        total_token_value = prompt_token_value + completion_token_value
+
+    return {
+        "prompt_tokens": prompt_token_value,
+        "completion_tokens": completion_token_value,
+        "total_tokens": total_token_value,
+        "prompt_eval_count": prompt_eval_count if prompt_eval_count is not None else prompt_token_value,
+        "eval_count": eval_count if eval_count is not None else completion_token_value,
+        "prompt_eval_duration_s": convert_ns_to_seconds(payload.get("prompt_eval_duration")),
+        "eval_duration_s": convert_ns_to_seconds(payload.get("eval_duration")),
+        "total_duration_s": convert_ns_to_seconds(payload.get("total_duration")),
+        "load_duration_s": convert_ns_to_seconds(payload.get("load_duration")),
+    }
 
 
 def normalize_non_content_type(field_name):
@@ -1017,35 +1207,30 @@ def classify_stream_result(
     finish_reason = None
     output_chars = 0
     thinking_chars = 0
+    output_tokens = 0
+    thinking_tokens = 0
+    usage_metrics = {}
 
     for record in chunk_records:
         if record["content"]:
             content_chunks += 1
             output_chars += len(record["content"])
+            output_tokens += record.get("content_tokens", estimate_token_count(record["content"]))
         if record.get("thinking"):
             thinking_chunks += 1
             thinking_chars += len(record["thinking"])
+            thinking_tokens += record.get("thinking_tokens", estimate_token_count(record["thinking"]))
         if record["non_content_types"]:
             non_content_chunks += 1
             non_content_types.update(record["non_content_types"])
         if record["finish_reason"]:
             finish_reason = record["finish_reason"]
+        for key, value in (record.get("usage_metrics") or {}).items():
+            if value is not None:
+                usage_metrics[key] = value
 
     first_event_seconds = round(first_event_time - start_time, 3) if first_event_time is not None else None
     stream_duration_seconds = round(end_time - start_time, 3)
-    thinking_phase_end_time = (
-        first_content_time
-        if first_thinking_time is not None
-        and first_content_time is not None
-        and first_content_time >= first_thinking_time
-        else end_time
-    )
-    thinking_time_s = calculate_duration_seconds(first_thinking_time, thinking_phase_end_time)
-    output_time_s = calculate_duration_seconds(first_content_time, end_time)
-    total_output_time_s = calculate_duration_seconds(
-        pick_earliest_time(first_thinking_time, first_content_time, first_event_time),
-        end_time,
-    )
 
     if content_chunks > 0 and first_content_time is not None:
         ttft = round(first_content_time - start_time, 3)
@@ -1090,6 +1275,15 @@ def classify_stream_result(
         output_category = "early_stop"
         diagnosis = "Stream ended before any textual content or terminal finish_reason was received."
 
+    prompt_tokens = usage_metrics.get("prompt_tokens")
+    completion_tokens = usage_metrics.get("completion_tokens")
+    total_tokens = usage_metrics.get("total_tokens")
+    prefill_time_seconds = usage_metrics.get("prompt_eval_duration_s")
+    prefill_tps = calculate_duration_tps(prompt_tokens, prefill_time_seconds)
+    if prefill_tps is None and prompt_tokens is not None and ttft is not None:
+        prefill_time_seconds = ttft
+        prefill_tps = calculate_duration_tps(prompt_tokens, ttft)
+
     return {
         "Status": status,
         "Output_Category": output_category,
@@ -1104,13 +1298,20 @@ def classify_stream_result(
         "Stream_Duration_s": stream_duration_seconds,
         "TTFT": ttft,
         "TPS": tps,
+        "Prompt_Tokens": prompt_tokens,
+        "Completion_Tokens": completion_tokens,
+        "Total_Tokens": total_tokens,
+        "Prefill_Time_s": prefill_time_seconds,
+        "Prefill_TPS": prefill_tps,
         "Thinking_Chars": thinking_chars,
+        "Thinking_Tokens": thinking_tokens,
         "Output_Chars": output_chars,
-        "Thinking_Time_s": thinking_time_s,
-        "Output_Time_s": output_time_s,
-        "Total_Output_Time_s": total_output_time_s,
-        "Thinking_TPS": calculate_tps_from_duration(thinking_chars, thinking_time_s),
-        "Output_TPS": calculate_tps_from_duration(output_chars, output_time_s),
+        "Output_Tokens": output_tokens,
+        "Thinking_Time_s": calculate_phase_time(start_time, first_content_time),
+        "Answer_Time_s": calculate_phase_time(first_content_time, end_time),
+        "Output_Time_s": calculate_text_duration(output_chars, first_content_time, end_time),
+        "Thinking_TPS": calculate_text_tps(thinking_tokens, first_thinking_time, end_time),
+        "Output_TPS": calculate_text_tps(output_tokens, first_content_time, end_time),
         "Output_Thinking_Ratio": calculate_output_thinking_ratio(output_chars, thinking_chars),
     }
 
@@ -1144,6 +1345,9 @@ def build_result_row(
         "TTFT": classification["TTFT"],
         "First_Event_s": classification["First_Event_s"],
         "Stream_Duration_s": classification["Stream_Duration_s"],
+        "Prompt_Tokens": classification.get("Prompt_Tokens"),
+        "Prefill_Time_s": classification.get("Prefill_Time_s"),
+        "Prefill_TPS": classification.get("Prefill_TPS"),
         "Total_Chunks": classification["Total_Chunks"],
         "Content_Chunks": classification["Content_Chunks"],
         "Non_Content_Chunks": classification["Non_Content_Chunks"],
@@ -1211,13 +1415,13 @@ def wrap_markdown_table_headers(df):
         "Thinking Mode": "Thinking Mode<br>State",
         "Output Category": "Output<br>Category",
         "Finish Reason": "Finish<br>Reason",
-        "Thinking Time (s)": "Thinking Time<br>(s)",
-        "Output Time (s)": "Output Time<br>(s)",
+        "Prompt Tokens": "Prompt<br>Tokens",
+        "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)",
         "Total Output (chars)": "Total Output<br>(chars)",
         "Total Output Time (s)": "Total Output Time<br>(s)",
         "TPS (chunk/s)": "TPS<br>(chunk/s)",
-        "Thinking TPS (token/s)": "Thinking TPS<br>(token/s)",
-        "Output TPS (token/s)": "Output TPS<br>(token/s)",
+        "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)",
+        "Output TPS (tok/s)": "Output TPS<br>(tok/s)",
         "Output/Thinking Ratio": "Output/Thinking<br>Ratio",
         "TTFT (s)": "TTFT<br>(s)",
         "First Event (s)": "First Event<br>(s)",
@@ -1328,10 +1532,17 @@ class NvidiaVRAMMonitor:
 def build_summary_dataframe(df):
     summary_source = df.copy()
     for column_name in (
+        "Prompt_Tokens",
+        "Thinking_Tokens",
+        "Answer_Tokens",
+        "Completion_Tokens",
+        "Total_Tokens",
+        "Token_Count_Source",
+        "Prefill_TPS",
         "Output_Chars",
-        "Thinking_Time_s",
         "Output_Time_s",
-        "Total_Output_Time_s",
+        "Thinking_Time_s",
+        "Answer_Time_s",
         "Thinking_TPS",
         "Output_TPS",
         "Output_Thinking_Ratio",
@@ -1346,10 +1557,17 @@ def build_summary_dataframe(df):
         "Model",
         "Finish_Reason",
         "Config_Str",
+        "Prompt_Tokens",
+        "Thinking_Tokens",
+        "Answer_Tokens",
+        "Completion_Tokens",
+        "Total_Tokens",
+        "Token_Count_Source",
+        "Prefill_TPS",
         "Output_Chars",
-        "Thinking_Time_s",
         "Output_Time_s",
-        "Total_Output_Time_s",
+        "Thinking_Time_s",
+        "Answer_Time_s",
         "TPS",
         "Thinking_TPS",
         "Output_TPS",
@@ -1363,6 +1581,23 @@ def build_summary_dataframe(df):
     ]
     if "Capability" in df.columns:
         summary_columns.insert(2, "Capability")
+    has_question_metadata = (
+        "Question_ID" in df.columns
+        and df["Question_ID"].fillna("").astype(str).str.strip().ne("").any()
+    )
+    if has_question_metadata:
+        question_columns = [
+            "Suite_ID",
+            "Question_ID",
+            "Question_Category",
+            "Question_Title",
+        ]
+        for column_name in question_columns:
+            if column_name not in summary_source.columns:
+                summary_source[column_name] = ""
+        insert_at = summary_columns.index("Capability") + 1 if "Capability" in summary_columns else 2
+        for column_name in reversed(question_columns):
+            summary_columns.insert(insert_at, column_name)
     if "System_Prompt_Label" in df.columns:
         summary_columns.insert(summary_columns.index("Model") + 1, "System_Prompt_Label")
     if "Thinking_Mode" in df.columns:
@@ -1375,6 +1610,18 @@ def build_summary_dataframe(df):
     summary_df["Finish_Reason"] = summary_df["Finish_Reason"].apply(format_text_value)
     if "Thinking_Mode" in summary_df.columns:
         summary_df["Thinking_Mode"] = summary_df["Thinking_Mode"].apply(resolve_thinking_mode)
+    summary_df["Prompt_Tokens"] = summary_df["Prompt_Tokens"].apply(format_token_count)
+    for token_column in (
+        "Thinking_Tokens",
+        "Answer_Tokens",
+        "Completion_Tokens",
+        "Total_Tokens",
+    ):
+        summary_df[token_column] = summary_df[token_column].apply(format_token_count)
+    summary_df["Token_Count_Source"] = summary_df["Token_Count_Source"].apply(format_text_value)
+    summary_df["Prefill_TPS"] = summary_df["Prefill_TPS"].apply(
+        lambda value: format_numeric_value(value, 2)
+    )
     summary_df["TPS"] = summary_df["TPS"].apply(lambda value: format_numeric_value(value, 2))
     summary_df["Thinking_TPS"] = summary_df["Thinking_TPS"].apply(
         lambda value: format_numeric_value(value, 2)
@@ -1388,13 +1635,13 @@ def build_summary_dataframe(df):
     summary_df["Output_Chars"] = summary_df["Output_Chars"].apply(
         lambda value: "N/A" if pd.isna(value) else int(value)
     )
-    summary_df["Thinking_Time_s"] = summary_df["Thinking_Time_s"].apply(
-        lambda value: format_numeric_value(value, 3)
-    )
     summary_df["Output_Time_s"] = summary_df["Output_Time_s"].apply(
         lambda value: format_numeric_value(value, 3)
     )
-    summary_df["Total_Output_Time_s"] = summary_df["Total_Output_Time_s"].apply(
+    summary_df["Thinking_Time_s"] = summary_df["Thinking_Time_s"].apply(
+        lambda value: format_numeric_value(value, 3)
+    )
+    summary_df["Answer_Time_s"] = summary_df["Answer_Time_s"].apply(
         lambda value: format_numeric_value(value, 3)
     )
     summary_df["TTFT"] = summary_df["TTFT"].apply(lambda value: format_numeric_value(value, 3))
@@ -1416,18 +1663,29 @@ def build_summary_dataframe(df):
         columns={
             "Run_ID": "Run",
             "Capability": "Capability",
+            "Suite_ID": "Suite ID",
+            "Question_ID": "Question ID",
+            "Question_Category": "Question Category",
+            "Question_Title": "Question Title",
             "Output_Category": "Output Category",
             "System_Prompt_Label": "System Prompt",
             "Thinking_Mode": "Thinking Mode",
             "Finish_Reason": "Finish Reason",
             "Config_Str": "Config",
+            "Prompt_Tokens": "Prompt Tokens",
+            "Thinking_Tokens": "Thinking Tokens",
+            "Answer_Tokens": "Answer Tokens",
+            "Completion_Tokens": "Completion Tokens",
+            "Total_Tokens": "Total Tokens",
+            "Token_Count_Source": "Token Count Source",
+            "Prefill_TPS": "Prefill TPS (tok/s)",
             "Output_Chars": "Total Output (chars)",
+            "Output_Time_s": "Total Output Time (s)",
             "Thinking_Time_s": "Thinking Time (s)",
-            "Output_Time_s": "Output Time (s)",
-            "Total_Output_Time_s": "Total Output Time (s)",
+            "Answer_Time_s": "Answer Time (s)",
             "TPS": "TPS (chunk/s)",
-            "Thinking_TPS": "Thinking TPS (token/s)",
-            "Output_TPS": "Output TPS (token/s)",
+            "Thinking_TPS": "Thinking TPS (tok/s)",
+            "Output_TPS": "Output TPS (tok/s)",
             "Output_Thinking_Ratio": "Output/Thinking Ratio",
             "TTFT": "TTFT (s)",
             "First_Event_s": "First Event (s)",
@@ -1464,6 +1722,65 @@ def html_escape_text(value):
     if isinstance(value, (dict, list)):
         value = json.dumps(value, ensure_ascii=False)
     return html.escape(str(value))
+
+
+def build_model_metric_charts_html(df):
+    """Render portable, dependency-free model comparison bars for HTML reports."""
+    if df is None or df.empty or "Model" not in df.columns:
+        return '<p class="empty-note">No model metrics are available for comparison. / 沒有可比較的模型指標。</p>'
+
+    source = df.copy()
+    if "Status" in source.columns:
+        ok_source = source[source["Status"] == "ok"]
+        if not ok_source.empty:
+            source = ok_source
+
+    metric_specs = (
+        ("Output_TPS", "Output TPS / 回覆速率", "tok/s", False),
+        ("TTFT", "TTFT / 首字延遲", "s", True),
+        ("VRAM_Peak_MiB", "VRAM Peak / 顯存峰值", "MiB", True),
+        ("Efficiency_Score", "Efficiency Score / 效率分數", "TPS/GiB Peak", False),
+    )
+    palette = ("#bd5d38", "#2d6f73", "#9a7b2f", "#6d5a86", "#55733f", "#a04d61")
+    chart_cards = []
+
+    for column_name, title, unit, lower_is_better in metric_specs:
+        if column_name not in source.columns:
+            continue
+        values = []
+        for model, group in source.groupby("Model", sort=True):
+            numeric_values = pd.to_numeric(group[column_name], errors="coerce").dropna()
+            numeric_values = numeric_values[numeric_values.map(lambda value: math.isfinite(float(value)))]
+            if not numeric_values.empty:
+                values.append((str(model), float(numeric_values.mean())))
+        if not values:
+            continue
+
+        scale_max = max(value for _, value in values) or 1.0
+        rows = []
+        for index, (model, value) in enumerate(values):
+            width = max(1.5, min(100.0, value / scale_max * 100.0)) if value > 0 else 0.0
+            rows.append(
+                '<div class="metric-bar-row">'
+                f'<div class="metric-bar-label" title="{html.escape(model)}">{html.escape(model)}</div>'
+                '<div class="metric-bar-track">'
+                f'<div class="metric-bar-fill" style="width:{width:.2f}%;background:{palette[index % len(palette)]}"></div>'
+                '</div>'
+                f'<div class="metric-bar-value">{value:.2f}</div>'
+                '</div>'
+            )
+        direction = "Lower is better / 越低越好" if lower_is_better else "Higher is better / 越高越好"
+        chart_cards.append(
+            '<article class="metric-chart">'
+            f'<h3>{html.escape(title)}</h3>'
+            f'<p>{html.escape(unit)} · {html.escape(direction)}</p>'
+            f'{"".join(rows)}'
+            '</article>'
+        )
+
+    if not chart_cards:
+        return '<p class="empty-note">No model metrics are available for comparison. / 沒有可比較的模型指標。</p>'
+    return '<div class="metric-chart-grid">' + "".join(chart_cards) + "</div>"
 
 
 def html_escape_header(value):
@@ -1534,6 +1851,12 @@ def save_summary_excel_workbook(df, config, report_stem):
     outcome_summary_df = make_excel_friendly_dataframe(
         localize_report_dataframe(build_outcome_summary_dataframe(df))
     )
+    suite_questions_df = make_excel_friendly_dataframe(
+        localize_report_dataframe(build_suite_questions_dataframe(config))
+    )
+    question_statistics_df = make_excel_friendly_dataframe(
+        localize_report_dataframe(build_question_statistics_dataframe(df))
+    )
     tool_call_success_summary_df = (
         make_excel_friendly_dataframe(
             localize_report_dataframe(build_tool_call_success_summary_dataframe(df))
@@ -1545,6 +1868,10 @@ def save_summary_excel_workbook(df, config, report_stem):
     with pd.ExcelWriter(workbook_path, engine="openpyxl") as writer:
         summary_df.to_excel(writer, sheet_name="Summary", index=False)
         outcome_summary_df.to_excel(writer, sheet_name="Outcome Summary", index=False)
+        if not suite_questions_df.empty:
+            suite_questions_df.to_excel(writer, sheet_name="Suite Questions", index=False)
+        if not question_statistics_df.empty:
+            question_statistics_df.to_excel(writer, sheet_name="Question Stats", index=False)
         if capability == "tools" and not tool_call_success_summary_df.empty:
             tool_call_success_summary_df.to_excel(writer, sheet_name="Tool Call Success", index=False)
 
@@ -1561,161 +1888,6 @@ def build_download_button(href, label):
         f'<a class="download-button" href="{html_escape_text(href)}" download>'
         f"{html_escape_text(label)}</a>"
     )
-
-
-def build_run_filter_panel_html():
-    filter_groups = [
-        (
-            bilingual_text("Tool Call", "工具呼叫"),
-            "tool-call",
-            [
-                ("yes", bilingual_text("Has tool call", "有呼叫 tool")),
-                ("no", bilingual_text("No tool call", "沒有呼叫 tool")),
-            ],
-        ),
-        (
-            bilingual_text("Thinking", "Thinking 內容"),
-            "thinking",
-            [
-                ("yes", bilingual_text("Has thinking", "有 thinking")),
-                ("no", bilingual_text("No thinking", "沒有 thinking")),
-            ],
-        ),
-        (
-            bilingual_text("Output", "輸出內容"),
-            "output",
-            [
-                ("yes", bilingual_text("Has output", "有 output")),
-                ("no", bilingual_text("No output", "沒有 output")),
-            ],
-        ),
-        (
-            bilingual_text("Thinking Mode", "思考模式"),
-            "thinking-mode",
-            [
-                ("enable", bilingual_text("Enable", "啟用")),
-                ("disable", bilingual_text("Disable", "停用")),
-                ("default", bilingual_text("Default", "預設")),
-            ],
-        ),
-        (
-            bilingual_text("Status", "狀態"),
-            "status",
-            [
-                ("ok", bilingual_text("ok", "正常")),
-                ("warning", bilingual_text("warning", "警告")),
-                ("error", bilingual_text("error", "錯誤")),
-            ],
-        ),
-    ]
-
-    parts = [
-        '<div class="filter-panel" id="run-filter-panel">',
-        '<div class="filter-toolbar">',
-        '<p class="filter-summary" id="run-filter-summary"></p>',
-        (
-            '<button type="button" class="filter-reset-button" id="run-filter-reset">'
-            'Reset Filters / 重設篩選</button>'
-        ),
-        "</div>",
-        '<div class="filter-groups">',
-    ]
-
-    for legend, group_name, options in filter_groups:
-        parts.append('<fieldset class="filter-group">')
-        parts.append(f"<legend>{legend}</legend>")
-        for value, label in options:
-            parts.append(
-                (
-                    '<label class="filter-option">'
-                    f'<input type="checkbox" class="run-filter-input" data-filter-group="{group_name}" '
-                    f'value="{value}" checked> '
-                    f"{label}</label>"
-                )
-            )
-        parts.append("</fieldset>")
-
-    parts.extend(
-        [
-            "</div>",
-            (
-                '<p class="empty-note" id="run-filter-empty" hidden>'
-                'No runs match the current filters. / 目前篩選條件下沒有符合的結果。</p>'
-            ),
-            "</div>",
-        ]
-    )
-    return "".join(parts)
-
-
-def build_run_filter_script():
-    return """<script>
-(() => {
-  const grid = document.getElementById('run-card-grid');
-  if (!grid) {
-    return;
-  }
-
-  const cards = Array.from(grid.querySelectorAll('.result-card'));
-  const inputs = Array.from(document.querySelectorAll('.run-filter-input'));
-  const summary = document.getElementById('run-filter-summary');
-  const emptyNote = document.getElementById('run-filter-empty');
-  const resetButton = document.getElementById('run-filter-reset');
-  const groups = ['tool-call', 'thinking', 'output', 'thinking-mode', 'status'];
-
-  function selectedValues(groupName) {
-    return new Set(
-      inputs
-        .filter((input) => input.dataset.filterGroup === groupName && input.checked)
-        .map((input) => input.value)
-    );
-  }
-
-  function applyFilters() {
-    const selectedByGroup = Object.fromEntries(
-      groups.map((groupName) => [groupName, selectedValues(groupName)])
-    );
-    let visibleCount = 0;
-
-    for (const card of cards) {
-      const matches = groups.every((groupName) => {
-        const selected = selectedByGroup[groupName];
-        if (selected.size === 0) {
-          return false;
-        }
-        return selected.has(card.getAttribute(`data-${groupName}`));
-      });
-
-      card.hidden = !matches;
-      if (matches) {
-        visibleCount += 1;
-      }
-    }
-
-    if (summary) {
-      summary.textContent = `${visibleCount} / ${cards.length} runs shown / 顯示 ${visibleCount} / ${cards.length} 筆`;
-    }
-    if (emptyNote) {
-      emptyNote.hidden = visibleCount !== 0;
-    }
-  }
-
-  for (const input of inputs) {
-    input.addEventListener('change', applyFilters);
-  }
-
-  if (resetButton) {
-    resetButton.addEventListener('click', () => {
-      for (const input of inputs) {
-        input.checked = true;
-      }
-      applyFilters();
-    });
-  }
-
-  applyFilters();
-})();
-</script>"""
 
 
 def key_value_rows_to_html_table(rows, table_class="kv-table"):
@@ -1744,6 +1916,17 @@ STATUS_BILINGUAL_MAP = {
 CAPABILITY_BILINGUAL_MAP = {
     "chat": bilingual_text("chat", "對話"),
     "tools": bilingual_text("tools", "工具呼叫"),
+    "suite-smoke-7": bilingual_text("suite-smoke-7", "七項能力冒煙套裝"),
+}
+
+QUESTION_CATEGORY_BILINGUAL_MAP = {
+    "math": bilingual_text("math", "數學"),
+    "logic": bilingual_text("logic", "邏輯"),
+    "reasoning": bilingual_text("reasoning", "推理"),
+    "reading": bilingual_text("reading", "閱讀"),
+    "translation": bilingual_text("translation", "翻譯"),
+    "writing": bilingual_text("writing", "寫作"),
+    "coding": bilingual_text("coding", "程式"),
 }
 
 OUTPUT_CATEGORY_BILINGUAL_MAP = {
@@ -1771,19 +1954,37 @@ REPORT_HEADER_BILINGUAL_MAP = {
     "Run": "Run<br>執行編號",
     "Status": "Status<br>狀態",
     "Capability": "Capability<br>能力模式",
+    "Suite ID": "Suite ID<br>套裝識別碼",
+    "Suite Version": "Suite Version<br>套裝版本",
+    "Question ID": "Question ID<br>題目識別碼",
+    "Question Category": "Question Category<br>題目分類",
+    "Question Title": "Question Title<br>題目名稱",
+    "Prompt": "Prompt<br>題目內容",
+    "Expected Output": "Expected Output<br>預期輸出",
+    "Evaluation Guide": "Evaluation Guide<br>評估提示",
     "Output Category": "Output Category<br>輸出分類",
     "Model": "Model<br>模型",
     "System Prompt": "System Prompt<br>系統提示",
     "Thinking Mode": "Thinking Mode<br>思考模式",
     "Finish Reason": "Finish Reason<br>結束原因",
     "Config": "Config<br>測試設定",
-    "Thinking Time (s)": "Thinking Time<br>(s)<br>思考時間",
-    "Output Time (s)": "Output Time<br>(s)<br>回覆時間",
+    "Prompt Tokens": "Prompt Tokens<br>提示詞 Token 數",
+    "Thinking Tokens": "Thinking Tokens<br>思考 Token 數",
+    "Answer Tokens": "Answer Tokens<br>回答 Token 數",
+    "Completion Tokens": "Completion Tokens<br>完成 Token 數",
+    "Total Tokens": "Total Tokens<br>總 Token 數",
+    "Token Count Source": "Token Count Source<br>Token 計數來源",
+    "Prefill TPS (tok/s)": "Prefill TPS<br>(tok/s)<br>預填充速率",
     "Total Output (chars)": "Total Output<br>(chars)<br>總輸出字數",
     "Total Output Time (s)": "Total Output Time<br>(s)<br>總輸出時間",
+    "Thinking Time (s)": "Thinking Time<br>(s)<br>思考時間",
+    "Answer Time (s)": "Answer Time<br>(s)<br>回答時間",
+    "Avg Thinking Time (s)": "Avg Thinking Time<br>(s)<br>平均思考時間",
+    "Avg Answer Time (s)": "Avg Answer Time<br>(s)<br>平均回答時間",
+    "Runs": "Runs<br>執行次數",
     "TPS (chunk/s)": "TPS<br>(chunk/s)<br>輸出速率",
-    "Thinking TPS (token/s)": "Thinking TPS<br>(token/s)<br>思考速率",
-    "Output TPS (token/s)": "Output TPS<br>(token/s)<br>回覆速率",
+    "Thinking TPS (tok/s)": "Thinking TPS<br>(tok/s)<br>思考速率",
+    "Output TPS (tok/s)": "Output TPS<br>(tok/s)<br>回覆速率",
     "Output/Thinking Ratio": "Output/Thinking<br>Ratio<br>輸出思考比",
     "TTFT (s)": "TTFT<br>(s)<br>首字延遲",
     "First Event (s)": "First Event<br>(s)<br>首事件延遲",
@@ -1832,6 +2033,10 @@ def localize_report_dataframe(df):
         localized_df["Status"] = localized_df["Status"].apply(localize_status_value)
     if "Capability" in localized_df.columns:
         localized_df["Capability"] = localized_df["Capability"].apply(localize_capability_value)
+    if "Question Category" in localized_df.columns:
+        localized_df["Question Category"] = localized_df["Question Category"].apply(
+            lambda value: QUESTION_CATEGORY_BILINGUAL_MAP.get(value, value)
+        )
     if "Output Category" in localized_df.columns:
         localized_df["Output Category"] = localized_df["Output Category"].apply(
             localize_output_category_value
@@ -1905,11 +2110,11 @@ def pause_before_exit():
 
     try:
         if msvcrt is not None:
-            print("\nPress any key to exit... / 按任意鍵結束...", end="", flush=True)
+            print("\n按任意鍵結束...", end="", flush=True)
             msvcrt.getch()
             print()
         else:
-            input("\nPress Enter to exit... / 按 Enter 結束...")
+            input("\n按 Enter 結束...")
     except (EOFError, KeyboardInterrupt):
         pass
 
@@ -1921,40 +2126,33 @@ def get_installed_version(package_name):
         return None
 
 
-def show_windows_error_dialog(title, message):
+def show_windows_message_dialog(title, message, style=0):
     if sys.platform != "win32":
         return False
 
     try:
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+        ctypes.windll.user32.MessageBoxW(None, message, title, style)
         return True
     except Exception:
         return False
 
 
-def print_warning_box(message, detail=None):
-    print("\n" + "=" * 62)
-    print(f"⚠️ Warning / 警告\n{message}")
-    if detail:
-        print(f"Detail / 詳細資訊: {detail}")
-    print("=" * 62)
+def show_windows_error_dialog(title, message):
+    return show_windows_message_dialog(title, message, style=0x10)
 
 
-def ask_backend_retry_or_back(message):
-    return ask_select_with_back(
-        message,
-        choices=[
-            Choice("Retry check / 重新檢查", value="retry"),
-            Choice("Go back / 返回上一階段", value="back"),
-        ],
-        default="retry",
-    )
+def show_windows_info_dialog(title, message):
+    return show_windows_message_dialog(title, message, style=0x40)
 
 
-def ensure_runtime_ready():
-    if not DEPENDENCY_IMPORT_ERRORS:
+def ensure_runtime_ready(require_questionary=False):
+    dependency_errors = dict(DEPENDENCY_IMPORT_ERRORS)
+    if not require_questionary:
+        dependency_errors.pop("questionary", None)
+
+    if not dependency_errors:
         return
 
     guidance = {
@@ -1969,7 +2167,7 @@ def ensure_runtime_ready():
         "這通常代表另一台電腦雖然有安裝套件，但版本不相容或安裝不完整。",
         "",
     ]
-    for package_name, exc in DEPENDENCY_IMPORT_ERRORS.items():
+    for package_name, exc in dependency_errors.items():
         installed_version = get_installed_version(package_name)
         version_label = f"已安裝 {installed_version}" if installed_version else "未偵測到安裝版本"
         hint = guidance.get(package_name, f"請重新安裝 `{package_name}`。")
@@ -1979,16 +2177,157 @@ def ensure_runtime_ready():
 
 
 def persist_crash_log(error_text):
-    crash_log_path = Path("expert_LLM_benchmark_crash.log")
+    crash_log_path = Path("llm_expert_bench_crash.log")
     crash_log_path.write_text(error_text, encoding="utf-8")
     return crash_log_path
 
 
-def get_project_python_command_hint():
-    if sys.platform == "win32":
-        return r".\.venv\Scripts\python.exe expert_LLM_benchmark.py"
+def persist_ui_launch_hint(url, report_root):
+    launch_hint_path = Path(UI_LAUNCH_HINT_FILENAME)
+    launch_hint_path.write_text(
+        "\n".join(
+            [
+                "DIY LLM Benchmark UI",
+                f"URL: {url}",
+                f"Report directory: {report_root}",
+                f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                "",
+                "If the browser did not open automatically, copy the URL above into your browser.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return launch_hint_path
 
-    return "./.venv/bin/python expert_LLM_benchmark.py"
+
+def build_suite_questions_dataframe(config):
+    capability = config.get("capability", "chat")
+    if capability not in BUILTIN_SUITES:
+        return pd.DataFrame()
+
+    questions = resolve_benchmark_questions(config)
+    return pd.DataFrame(
+        [
+            {
+                "Suite ID": question["suite_id"],
+                "Suite Version": question["suite_version"],
+                "Question ID": question["id"],
+                "Question Category": question["category"],
+                "Question Title": question["title"],
+                "Prompt": question["prompt"],
+                "Expected Output": question["expected_output"],
+                "Evaluation Guide": question["evaluation_guide"],
+            }
+            for question in questions
+        ]
+    )
+
+
+def build_question_statistics_dataframe(df):
+    if "Question_ID" not in df.columns:
+        return pd.DataFrame()
+
+    question_df = df[df["Question_ID"].fillna("").astype(str).str.strip().ne("")].copy()
+    if question_df.empty:
+        return pd.DataFrame()
+
+    group_columns = [
+        "Suite_ID",
+        "Question_ID",
+        "Question_Category",
+        "Question_Title",
+        "Model",
+    ]
+    for column_name in group_columns:
+        if column_name not in question_df.columns:
+            question_df[column_name] = ""
+    for column_name in (
+        "Prompt_Tokens",
+        "Thinking_Tokens",
+        "Answer_Tokens",
+        "Completion_Tokens",
+        "Total_Tokens",
+        "Thinking_Time_s",
+        "Answer_Time_s",
+    ):
+        if column_name not in question_df.columns:
+            question_df[column_name] = None
+
+    records = []
+    for group_values, group in question_df.groupby(group_columns, dropna=False, sort=False):
+        suite_id, question_id, category, title, model = group_values
+
+        def sum_tokens(column_name):
+            values = pd.to_numeric(group[column_name], errors="coerce")
+            return int(values.fillna(0).sum())
+
+        def average_seconds(column_name):
+            values = pd.to_numeric(group[column_name], errors="coerce").dropna()
+            return round(float(values.mean()), 3) if not values.empty else None
+
+        token_sources = sorted(
+            {
+                str(value).strip()
+                for value in group.get("Token_Count_Source", pd.Series(dtype=str)).dropna()
+                if str(value).strip()
+            }
+        )
+        records.append(
+            {
+                "Suite ID": suite_id,
+                "Question ID": question_id,
+                "Question Category": category,
+                "Question Title": title,
+                "Model": model,
+                "Runs": len(group),
+                "Prompt Tokens": sum_tokens("Prompt_Tokens"),
+                "Thinking Tokens": sum_tokens("Thinking_Tokens"),
+                "Answer Tokens": sum_tokens("Answer_Tokens"),
+                "Completion Tokens": sum_tokens("Completion_Tokens"),
+                "Total Tokens": sum_tokens("Total_Tokens"),
+                "Avg Thinking Time (s)": average_seconds("Thinking_Time_s"),
+                "Avg Answer Time (s)": average_seconds("Answer_Time_s"),
+                "Token Count Source": ", ".join(token_sources) or "N/A",
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def build_ui_launch_message(url, report_root, launch_hint_path, browser_opened):
+    lines = [
+        "DIY LLM Benchmark local UI is ready.",
+        url,
+        "",
+        f"Report directory: {report_root}",
+        f"Launch hint file: {launch_hint_path.resolve()}",
+        "",
+    ]
+    if browser_opened:
+        lines.append("A browser tab was opened automatically if Windows allowed it.")
+    else:
+        lines.append("Browser auto-open did not succeed. Please open the URL manually.")
+    return "\n".join(lines)
+
+
+def try_open_browser(url):
+    browser_error = None
+    try:
+        if webbrowser.open(url, new=2):
+            return True, None
+    except Exception as exc:
+        browser_error = exc
+
+    if sys.platform == "win32":
+        try:
+            os.startfile(url)
+            return True, None
+        except Exception as exc:
+            if browser_error is None:
+                browser_error = exc
+
+    if browser_error is None:
+        browser_error = RuntimeError("No registered browser handler reported success.")
+    return False, str(browser_error)
 
 
 def handle_fatal_error(exc):
@@ -1999,7 +2338,7 @@ def handle_fatal_error(exc):
     error_text = "\n".join(
         [
             "程式執行失敗。",
-            f"建議在專案目錄用 `.venv` 內的 Python 執行，例如 `{get_project_python_command_hint()}`，比較容易看到完整訊息。",
+            "建議用 PowerShell 或 CMD 執行 `python llm_expert_bench.py`，比較容易看到完整訊息。",
             "",
             f"{type(exc).__name__}: {exc}",
             "",
@@ -2022,50 +2361,31 @@ def handle_fatal_error(exc):
                 "請改用 PowerShell / CMD 執行，或把 crash log 傳回來。",
             ]
         )
-        show_windows_error_dialog("expert_LLM_benchmark 啟動失敗", dialog_message)
+        show_windows_error_dialog("llm_expert_bench 啟動失敗", dialog_message)
 
 
 def select_models_and_url(backend, previous_url=None, previous_models=None):
     previous_models = previous_models or []
 
     if backend == "ollama":
+        detected_models = get_ollama_models()
+        if detected_models:
+            choice_list = [
+                Choice(model_name, value=model_name, checked=model_name in previous_models)
+                for model_name in detected_models
+            ]
+            selected_models = ask_checkbox_with_back(
+                "Select benchmark models / 選擇測試模型:",
+                choices=choice_list,
+            )
+            if selected_models is None:
+                return None
+            if selected_models == BACK_ACTION:
+                return BACK_ACTION
+            if selected_models:
+                return "http://localhost:11434/v1", selected_models
+
         while True:
-            backend_status = inspect_backend_readiness("ollama", OLLAMA_BASE_URL)
-            if not backend_status.get("ok"):
-                print_warning_box(
-                    backend_status["message"],
-                    detail=backend_status.get("detail"),
-                )
-                retry_action = ask_backend_retry_or_back(
-                    "Ollama backend check failed. Retry after fixing it, or go back? / "
-                    "Ollama 後端檢查失敗。修正後要重試，還是返回上一階段？"
-                )
-                if retry_action is None:
-                    return None
-                if retry_action in (BACK_ACTION, "back"):
-                    return BACK_ACTION
-                continue
-
-            detected_models = backend_status.get("models", [])
-            if backend_status.get("warning"):
-                print_warning_box(backend_status["warning"])
-
-            if detected_models:
-                choice_list = [
-                    Choice(model_name, value=model_name, checked=model_name in previous_models)
-                    for model_name in detected_models
-                ]
-                selected_models = ask_checkbox_with_back(
-                    "Select benchmark models / 選擇測試模型:",
-                    choices=choice_list,
-                )
-                if selected_models is None:
-                    return None
-                if selected_models == BACK_ACTION:
-                    return BACK_ACTION
-                if selected_models:
-                    return OLLAMA_BASE_URL, selected_models
-
             manual_input = ask_text_with_back(
                 "Enter Ollama model names (comma separated) / 請輸入 Ollama 模型名稱（逗號分隔）:",
                 default=",".join(previous_models) if previous_models else "qwen3.5:latest",
@@ -2076,58 +2396,27 @@ def select_models_and_url(backend, previous_url=None, previous_models=None):
                 return BACK_ACTION
             models = [name.strip() for name in (manual_input or "").split(",") if name.strip()]
             if models:
-                return OLLAMA_BASE_URL, models
-            print("Please enter at least one model name. / 請至少輸入一個模型名稱。")
+                return "http://localhost:11434/v1", models
+            print("At least one model is required. / 至少需要一個模型名稱。")
 
-    port_default = DEFAULT_LLAMA_PORT
+    port_default = "8080"
     if previous_url and previous_url.startswith("http://localhost:") and previous_url.endswith("/v1"):
-        port_default = previous_url.removeprefix("http://localhost:").removesuffix("/v1") or DEFAULT_LLAMA_PORT
+        port_default = previous_url.removeprefix("http://localhost:").removesuffix("/v1") or "8080"
 
     while True:
-        raw_port = ask_text_with_back(
+        port = ask_text_with_back(
             "Enter llama-server port / 請輸入 llama-server 端口:",
             default=port_default,
         )
-        if raw_port is None:
+        if port is None:
             return None
-        if raw_port == BACK_ACTION:
+        if port == BACK_ACTION:
             return BACK_ACTION
-
-        port, port_error = normalize_local_port(raw_port, default=port_default)
-        if port_error:
-            print_warning_box(port_error)
-            continue
-
-        url = f"http://localhost:{port}/v1"
-        backend_status = inspect_backend_readiness("llama.cpp", url)
-        if not backend_status.get("ok"):
-            print_warning_box(
-                backend_status["message"],
-                detail=backend_status.get("detail"),
-            )
-            retry_action = ask_backend_retry_or_back(
-                "llama.cpp backend check failed. Retry after fixing it, or go back? / "
-                "llama.cpp 後端檢查失敗。修正後要重試，還是返回上一階段？"
-            )
-            if retry_action is None:
-                return None
-            if retry_action in (BACK_ACTION, "back"):
-                return BACK_ACTION
-            port_default = port
-            continue
-
-        if backend_status.get("warning"):
-            print_warning_box(backend_status["warning"])
-
-        detected_models = backend_status.get("models", [])
-        suggested_models = ",".join(previous_models) if previous_models else ",".join(detected_models)
-        if not suggested_models:
-            suggested_models = "llama.cpp-model"
 
         model_names = ask_text_with_back(
             "Enter loaded model names (comma separated, for labeling only) / "
             "請輸入載入中的模型名稱（逗號分隔，僅供辨識）:",
-            default=suggested_models,
+            default=",".join(previous_models) if previous_models else "llama.cpp-model",
         )
         if model_names is None:
             return None
@@ -2136,8 +2425,8 @@ def select_models_and_url(backend, previous_url=None, previous_models=None):
 
         models = [name.strip() for name in (model_names or "").split(",") if name.strip()]
         if models:
-            return url, models
-        print("Please enter at least one model name. / 請至少輸入一個模型名稱。")
+            return f"http://localhost:{port or '8080'}/v1", models
+        print("At least one model is required. / 至少需要一個模型名稱。")
 
 
 def interactive_config():
@@ -3758,7 +4047,7 @@ def main():
 
     results_df = run_bench(config)
     if results_df.empty:
-        print("No benchmark rows were produced. / 沒有產生任何 benchmark 結果列。")
+        print("No benchmark rows were produced.")
         return
 
     ok_count = int((results_df["Status"] == "ok").sum())
@@ -4188,6 +4477,9 @@ def inspect_stream_chunk(chunk):
         "thinking": "",
         "non_content_types": [],
         "finish_reason": None,
+        "content_tokens": 0,
+        "thinking_tokens": 0,
+        "usage_metrics": extract_stream_usage_metrics(chunk),
     }
 
     choices = getattr(chunk, "choices", None) or []
@@ -4204,6 +4496,8 @@ def inspect_stream_chunk(chunk):
         if reasoning_value is not None:
             reasoning_parts.append(normalize_reasoning_content(reasoning_value))
     chunk_info["thinking"] = "".join(reasoning_parts)
+    chunk_info["content_tokens"] = estimate_token_count(chunk_info["content"])
+    chunk_info["thinking_tokens"] = estimate_token_count(chunk_info["thinking"])
 
     chunk_info["non_content_types"] = sorted(
         {normalize_non_content_type(field_name) for field_name in delta_payload}
@@ -4227,19 +4521,59 @@ def build_result_row(
     error_message,
     system_prompt_label="N/A",
     system_prompt_text="",
+    question=None,
 ):
     efficiency_score = calculate_efficiency_score(classification["TPS"], vram_metrics["VRAM_Peak_MiB"])
     retained_sections = build_retained_sections(thinking_text, dialogue_output_text)
     thinking_chars = classification.get("Thinking_Chars", len(thinking_text))
     output_chars = classification.get("Output_Chars", len(dialogue_output_text))
-    thinking_tokens = estimate_token_count(thinking_text)
-    output_tokens = estimate_token_count(dialogue_output_text)
-    thinking_tps = calculate_tps_from_duration(thinking_tokens, classification.get("Thinking_Time_s"))
-    output_tps = calculate_tps_from_duration(output_tokens, classification.get("Output_Time_s"))
+    question = question or resolve_benchmark_questions(config)[0]
+    reported_prompt_tokens = classification.get("Prompt_Tokens")
+    reported_completion_tokens = classification.get("Completion_Tokens")
+    reported_total_tokens = classification.get("Total_Tokens")
+    estimated_prompt_tokens = estimate_token_count(
+        "\n".join(
+            text
+            for text in (system_prompt_text, question.get("prompt", config.get("prompt", "")))
+            if text
+        )
+    )
+    thinking_tokens = classification.get("Thinking_Tokens", estimate_token_count(thinking_text))
+    answer_tokens = classification.get("Output_Tokens", estimate_token_count(dialogue_output_text))
+    prompt_tokens = reported_prompt_tokens if reported_prompt_tokens is not None else estimated_prompt_tokens
+    completion_tokens = (
+        reported_completion_tokens
+        if reported_completion_tokens is not None
+        else thinking_tokens + answer_tokens
+    )
+    total_tokens = (
+        reported_total_tokens
+        if reported_total_tokens is not None
+        else prompt_tokens + completion_tokens
+    )
+    if reported_total_tokens is not None or (
+        reported_prompt_tokens is not None and reported_completion_tokens is not None
+    ):
+        token_count_source = "backend_usage"
+    elif reported_prompt_tokens is not None or reported_completion_tokens is not None:
+        token_count_source = "mixed"
+    else:
+        token_count_source = "estimated"
     return {
         "Run_ID": run_id,
         "Status": classification["Status"],
         "Capability": config.get("capability", "chat"),
+        "Suite_ID": question.get("suite_id", ""),
+        "Suite_Version": question.get("suite_version", ""),
+        "Question_ID": question.get("id", ""),
+        "Question_Category": question.get("category", ""),
+        "Question_Title": question.get("title", ""),
+        "Question_Prompt": question.get("prompt", config.get("prompt", "")),
+        "Expected_Output": question.get("expected_output", ""),
+        "Evaluation_Guide": question.get("evaluation_guide", ""),
+        "Question_Auto_Checks": question.get("auto_checks", {}),
+        "Question_Wiki_Source": question.get("wiki_source_path", question.get("wiki_source", "")),
+        "Question_Wiki_Excerpt_Chars": question.get("wiki_excerpt_chars", ""),
         "Output_Category": classification["Output_Category"],
         "Diagnosis": classification["Diagnosis"],
         "Finish_Reason": classification["Finish_Reason"],
@@ -4255,6 +4589,12 @@ def build_result_row(
         "TTFT": classification["TTFT"],
         "First_Event_s": classification["First_Event_s"],
         "Stream_Duration_s": classification["Stream_Duration_s"],
+        "Thinking_Time_s": classification.get("Thinking_Time_s"),
+        "Answer_Time_s": classification.get("Answer_Time_s"),
+        "Prompt_Tokens": prompt_tokens,
+        "Completion_Tokens": completion_tokens,
+        "Total_Tokens": total_tokens,
+        "Token_Count_Source": token_count_source,
         "Total_Chunks": classification["Total_Chunks"],
         "Content_Chunks": classification["Content_Chunks"],
         "Non_Content_Chunks": classification["Non_Content_Chunks"],
@@ -4264,21 +4604,20 @@ def build_result_row(
         "VRAM_Delta_MiB": vram_metrics["VRAM_Delta_MiB"],
         "VRAM_Detail": vram_metrics["VRAM_Detail"],
         "Efficiency_Score": efficiency_score,
-        "Thinking_Time_s": classification.get("Thinking_Time_s"),
-        "Thinking_TPS": thinking_tps,
-        "Output_Time_s": classification.get("Output_Time_s"),
-        "Output_TPS": output_tps,
+        "Thinking_TPS": classification.get("Thinking_TPS"),
+        "Output_TPS": classification.get("Output_TPS"),
         "Output_Thinking_Ratio": classification.get("Output_Thinking_Ratio"),
-        "Total_Output_Time_s": classification.get("Total_Output_Time_s"),
+        "Output_Time_s": classification.get("Output_Time_s"),
         "Retained_Sections": retained_sections,
         "Thinking_Chars": thinking_chars,
         "Thinking_Tokens": thinking_tokens,
         "Thinking_Text": thinking_text,
         "Dialogue_Output_Chars": output_chars,
-        "Dialogue_Output_Tokens": output_tokens,
+        "Dialogue_Output_Tokens": answer_tokens,
         "Dialogue_Output_Text": dialogue_output_text,
         "Output_Chars": output_chars,
-        "Output_Tokens": output_tokens,
+        "Output_Tokens": answer_tokens,
+        "Answer_Tokens": answer_tokens,
         "Output_Text": dialogue_output_text,
         "Error": error_message or "",
     }
@@ -4287,38 +4626,71 @@ def build_result_row(
 def run_bench(config):
     client = OpenAI(base_url=config["url"], api_key="sk-no-key-needed")
     capability = config.get("capability", "chat")
-    capability_label = {"chat": "chat", "tools": "tools"}.get(capability, capability)
+    capability_label = {
+        "chat": "chat",
+        "tools": "tools",
+        "suite-smoke-7": "suite-smoke-7",
+        LOCAL_EXPERT_BATTLE_SUITE_ID: "local-expert-battle-48",
+    }.get(capability, capability)
     param_keys = list(config["params"].keys())
     param_values = [config["params"][key] for key in param_keys]
     combos = [dict(zip(param_keys, combo)) for combo in product(*param_values)] if param_keys else [{}]
     system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
+    benchmark_questions = resolve_benchmark_questions(config)
     include_system_prompt_in_label = len(system_prompt_variants) > 1 or system_prompt_variants[0]["label"] != "N/A"
 
     results = []
-    total_runs = len(config["models"]) * len(combos) * len(system_prompt_variants)
+    total_runs = (
+        len(config["models"])
+        * len(combos)
+        * len(system_prompt_variants)
+        * len(benchmark_questions)
+    )
     vram_monitoring_enabled = query_nvidia_vram_snapshot() is not None
     config["vram_monitoring"] = "nvidia-smi" if vram_monitoring_enabled else "unavailable"
 
-    print(f"\nStarting benchmark / 開始 benchmark，共 {total_runs} 次執行。Mode / 模式: {capability_label}")
-    print(
-        "Chat mode focuses on TPS/TTFT. Tools mode focuses on tool_call success and first event latency. / "
-        "Chat 模式主要看 TPS 與 TTFT；Tools 模式主要看 tool_call 成功率與首事件延遲。"
-    )
-    print(f"System prompt variants / System prompt 變體數: {len(system_prompt_variants)}")
+    print(f"\nStarting benchmark with {total_runs} runs. Mode: {capability_label}")
+    print("Chat mode focuses on TPS/TTFT. Tools mode focuses on tool_call success and first event latency.")
+    print(f"System prompt variants: {len(system_prompt_variants)}")
+    print(f"Questions per configuration: {len(benchmark_questions)}")
+    if config.get("use_current_llama_cpp_model"):
+        print(f"llama.cpp direct mode: using the model currently served by {config['url']}")
     if vram_monitoring_enabled:
-        print("VRAM monitoring / VRAM 監控: enabled via nvidia-smi / 已透過 nvidia-smi 啟用")
+        print("VRAM monitoring: enabled via nvidia-smi")
     else:
-        print("VRAM monitoring / VRAM 監控: nvidia-smi not available, VRAM fields will be N/A / 未偵測到 nvidia-smi，VRAM 欄位將顯示 N/A")
+        print("VRAM monitoring: nvidia-smi not available, VRAM fields will be N/A")
 
     run_index = 0
     for model in config["models"]:
-        for system_prompt_variant in system_prompt_variants:
-            for param_set in combos:
+        if config.get("backend") == "llama.cpp" and config.get("llama_cpp_auto_switch"):
+            model_entry = next(
+                (
+                    item
+                    for item in config.get("llama_cpp_model_entries", [])
+                    if item.get("name") == model
+                ),
+                None,
+            )
+            if model_entry is None:
+                raise RuntimeError(f"No easy_llamacpp catalog entry resolved for {model}.")
+            print(f"Switching llama.cpp model: {model} ({model_entry['path']})")
+            switch_started_at = time.monotonic()
+            start_llama_cpp_model(model_entry, config["url"])
+            print(f"llama.cpp ready: {model} ({time.monotonic() - switch_started_at:.1f}s)")
+            # Rebuild the client after the launcher has replaced the HTTP server process.
+            client = OpenAI(base_url=config["url"], api_key="sk-no-key-needed")
+        for system_prompt_variant, question, param_set in product(
+            system_prompt_variants,
+            benchmark_questions,
+            combos,
+        ):
                 run_index += 1
                 applied_params = build_backend_options(config["backend"], param_set)
                 display_params = format_param_dict(param_set)
                 if include_system_prompt_in_label:
                     display_params = f"{display_params} | system_prompt={system_prompt_variant['label']}"
+                if question.get("id"):
+                    display_params = f"{display_params} | question={question['id']}"
                 print(
                     f"[{run_index}/{total_runs}] {model} | {display_params}"
                 )
@@ -4346,6 +4718,7 @@ def run_bench(config):
                         model,
                         request_kwargs,
                         system_prompt_text=system_prompt_variant["text"],
+                        prompt=question["prompt"],
                     )
                     stream = client.chat.completions.create(**request_payload)
 
@@ -4396,6 +4769,7 @@ def run_bench(config):
                             dialogue_output_text=dialogue_output_text,
                             thinking_text=thinking_text,
                             error_message=None,
+                            question=question,
                         )
                     )
                 except Exception as exc:
@@ -4430,6 +4804,7 @@ def run_bench(config):
                             dialogue_output_text=dialogue_output_text,
                             thinking_text=thinking_text,
                             error_message=str(exc),
+                            question=question,
                         )
                     )
 
@@ -4444,6 +4819,12 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
     system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
     localized_summary_df = localize_report_dataframe(summary_df)
     localized_outcome_summary_df = localize_report_dataframe(outcome_summary_df)
+    localized_suite_questions_df = localize_report_dataframe(
+        build_suite_questions_dataframe(config)
+    )
+    localized_question_statistics_df = localize_report_dataframe(
+        build_question_statistics_dataframe(df)
+    )
     tool_call_success_summary_df = (
         build_tool_call_success_summary_dataframe(df) if capability == "tools" else pd.DataFrame()
     )
@@ -4466,8 +4847,8 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
         ),
         (
             bilingual_text("Note", "備註"),
-            "TPS is estimated from streaming content chunks, while Thinking TPS and Output TPS use estimated token counts from retained text. / "
-            "TPS 以帶文字內容的串流片段估算；Thinking TPS 與 Output TPS 則以保留文字的估算 token 數計算。",
+            "TPS is estimated from streaming content chunks for relative comparison. / "
+            "TPS 以帶文字內容的串流片段估算，適合做相對比較。",
         ),
     ]
     if capability == "tools":
@@ -4480,6 +4861,16 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
                 "請優先看 `Output Category=tool_call` 與 `First Event (s)`。",
             )
         )
+    if capability in BUILTIN_SUITES or capability == LOCAL_EXPERT_BATTLE_SUITE_ID:
+        suite = get_suite_definition(capability)
+        matrix_rows.extend(
+            [
+                (bilingual_text("Suite ID", "套裝識別碼"), suite["id"]),
+                (bilingual_text("Suite Version", "套裝版本"), suite["version"]),
+                (bilingual_text("Question Count", "題目數量"), len(suite["questions"])),
+                (bilingual_text("Suite Description", "套裝說明"), suite["description"]),
+            ]
+        )
 
     environment_notes = [
         f"VRAM monitoring: {config.get('vram_monitoring', 'unavailable')} / "
@@ -4487,12 +4878,16 @@ def save_markdown_report(df, config, report_stem, summary_excel_path=None):
     ]
     metric_notes = [
         "`TPS (chunk/s)`: Estimated throughput from text-bearing streaming chunks. / 以含文字的串流片段估算輸出速度。",
+        "`Prompt Tokens`: Prompt-side token count reported by the backend when available. / Prompt 端 token 數，優先使用後端回傳值。",
+        "`Thinking Time (s)`: Time from request dispatch until the first visible answer token; includes prefill and hidden or exposed reasoning. / 從送出請求到第一個可見回答 token，包含預填充及隱藏或顯式推理。",
+        "`Answer Time (s)`: Time from the first visible answer token to stream end. / 從第一個可見回答 token 到串流結束。",
+        "`Total Tokens`: Prompt plus completion tokens for the question. Backend usage is preferred; otherwise the value is estimated. / 每題提示與完成 token 總和，優先採後端 usage，否則使用估算值。",
+        "`Token Count Source`: `backend_usage`, `mixed`, or `estimated`. / Token 數來源分為後端 usage、混合或估算。",
+        "`Prefill TPS (tok/s)`: Prompt token throughput. Uses Ollama prompt-eval timing when available; otherwise falls back to `prompt_tokens / TTFT`. / 預填充速度，優先使用 Ollama 的 prompt_eval_duration，否則回退為 `prompt_tokens / TTFT`。",
         "`Total Output (chars)`: Total visible dialogue output character count retained for the run. / 本次保留的可見回覆總字數。",
-        "`Thinking Time (s)`: Time from the first thinking payload to the first output chunk, or to stream end if no output chunk arrived. / 從第一段 thinking 到第一段 output 的時間；若沒有 output，則到串流結束。",
-        "`Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
-        "`Total Output Time (s)`: Time from the earliest thinking/output payload, or first stream event fallback, to stream end. / 從最早的 thinking 或 output 開始計時；若兩者都沒有，則退回第一個串流事件到結束的時間。",
-        "`Thinking TPS (token/s)`: Estimated thinking tokens divided by `Thinking Time (s)`. / 估算的 thinking token 數除以 `Thinking Time (s)`。",
-        "`Output TPS (token/s)`: Estimated dialogue output tokens divided by `Output Time (s)`. / 估算的最終回覆 token 數除以 `Output Time (s)`。",
+        "`Total Output Time (s)`: Time from the first output text chunk to stream end. / 從第一段輸出文字到串流結束的時間。",
+        "`Thinking TPS (tok/s)`: Estimated retained-thinking token throughput from the first thinking payload to stream end. / 從第一段 thinking 到結束的思考 token 速率。",
+        "`Output TPS (tok/s)`: Estimated visible dialogue-output token throughput from the first output text chunk to stream end. / 從第一段輸出文字到結束的回覆 token 速率。",
         "`Output/Thinking Ratio`: `Dialogue Output Chars / Thinking Chars`; higher means more visible answer text per retained thinking text. / 回覆字數除以 thinking 字數，越高代表可見答案佔比越高。",
         "`TTFT (s)`: Time to first text chunk. / 首段文字輸出的延遲。",
         "`First Event (s)`: Time to the first streamed event of any kind. / 第一個串流事件出現的延遲。",
@@ -4638,6 +5033,53 @@ th {
     color: #6f7c88;
     text-align: center;
 }
+.metric-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+.metric-chart {
+    border-top: 3px solid #b88a44;
+    padding-top: 14px;
+}
+.metric-chart > p {
+    color: #6f7c88;
+    font-size: 0.84rem;
+    margin: -6px 0 14px;
+}
+.metric-bar-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 0.8fr) minmax(140px, 2fr) 72px;
+    align-items: center;
+    gap: 10px;
+    min-height: 34px;
+}
+.metric-bar-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.86rem;
+    font-weight: 650;
+}
+.metric-bar-track {
+    height: 13px;
+    background: #eee5d7;
+    overflow: hidden;
+}
+.metric-bar-fill {
+    height: 100%;
+    min-width: 0;
+}
+.metric-bar-value {
+    font-family: "Cascadia Code", "Consolas", monospace;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.84rem;
+}
+@media (max-width: 760px) {
+    .metric-chart-grid { grid-template-columns: 1fr; }
+    .metric-bar-row { grid-template-columns: minmax(90px, 0.8fr) minmax(100px, 2fr) 64px; }
+}
 .download-button {
     display: inline-flex;
     align-items: center;
@@ -4655,80 +5097,6 @@ th {
 .download-button:hover {
     background: #e4b45e;
 }
-.filter-panel {
-    border: 1px solid #e5dac8;
-    border-radius: 16px;
-    padding: 16px 18px;
-    background: #fff7eb;
-    margin-bottom: 18px;
-}
-.filter-toolbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    margin-bottom: 14px;
-}
-.filter-summary {
-    color: #566370;
-    font-weight: 600;
-}
-.filter-groups {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 12px;
-}
-.filter-group {
-    margin: 0;
-    padding: 10px 12px 12px;
-    border: 1px solid #dccfbb;
-    border-radius: 14px;
-    min-width: 0;
-}
-.filter-group legend {
-    font-weight: 700;
-    color: #263746;
-    padding: 0 6px;
-}
-.filter-option {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 8px;
-    font-size: 0.95rem;
-}
-.filter-reset-button {
-    min-height: 36px;
-    padding: 0 12px;
-    border-radius: 999px;
-    border: 1px solid #c6a56a;
-    background: #fffdfa;
-    color: #263746;
-    font-weight: 700;
-    cursor: pointer;
-}
-.filter-reset-button:hover {
-    background: #f6efe2;
-}
-.run-badges {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    margin-bottom: 14px;
-}
-.run-badge {
-    display: inline-flex;
-    align-items: center;
-    min-height: 28px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background: #f6efe2;
-    border: 1px solid #e5dac8;
-    color: #495866;
-    font-size: 0.88rem;
-    font-weight: 600;
-}
         </style>""",
         "</head>",
         "<body>",
@@ -4741,9 +5109,26 @@ th {
         key_value_rows_to_html_table(matrix_rows, table_class="matrix-table"),
         "</div>",
         "</section>",
-        '<section class="section">',
-        f"<h2>{bilingual_text('System Prompt Variants', '系統提示變體')}</h2>",
     ]
+
+    if not localized_suite_questions_df.empty:
+        page_parts.extend(
+            [
+                '<section class="section">',
+                f"<h2>{bilingual_text('Suite Questions', '套裝題庫')}</h2>",
+                '<div class="table-wrap">',
+                dataframe_to_html_table(localized_suite_questions_df),
+                "</div>",
+                "</section>",
+            ]
+        )
+
+    page_parts.extend(
+        [
+            '<section class="section">',
+            f"<h2>{bilingual_text('System Prompt Variants', '系統提示變體')}</h2>",
+        ]
+    )
 
     if system_prompt_variants[0]["label"] == "N/A" and len(system_prompt_variants) == 1:
         page_parts.append(
@@ -4762,6 +5147,18 @@ th {
             )
         page_parts.append("</div>")
 
+    if not localized_question_statistics_df.empty:
+        page_parts.extend(
+            [
+                "</section>",
+                '<section class="section">',
+                f"<h2>{bilingual_text('Question Statistics', '題目統計')}</h2>",
+                '<div class="table-wrap">',
+                dataframe_to_html_table(localized_question_statistics_df),
+                "</div>",
+            ]
+        )
+
     page_parts.extend(
         [
         "</section>",
@@ -4772,6 +5169,10 @@ th {
         '<section class="section">',
         f"<h2>{bilingual_text('Metric Notes', '指標說明')}</h2>",
         bullet_list_to_html(metric_notes),
+        "</section>",
+        '<section class="section">',
+        f"<h2>{bilingual_text('Model Comparison', '模型長條圖對比')}</h2>",
+        build_model_metric_charts_html(df),
         "</section>",
         '<section class="section">',
         f"<h2>{bilingual_text('Retained Text Notes', '保留文字說明')}</h2>",
@@ -4818,8 +5219,7 @@ th {
         [
             '<section class="section">',
             f"<h2>{bilingual_text('Generated Outputs', '各次執行輸出')}</h2>",
-            build_run_filter_panel_html(),
-            '<div class="run-grid" id="run-card-grid">',
+            '<div class="run-grid">',
         ]
     )
 
@@ -4841,28 +5241,6 @@ th {
         thinking_text = row.get("Thinking_Text", "")
         dialogue_output_text = row.get("Dialogue_Output_Text", row.get("Output_Text", ""))
         system_prompt_text = row.get("System_Prompt_Text", "")
-        thinking_mode = resolve_thinking_mode(row.get("Thinking_Mode", "default"))
-        has_tool_call = (
-            row.get("Output_Category") == "tool_call"
-            or "tool_calls" in parse_non_content_types(row.get("Non_Content_Types"))
-        )
-        has_thinking = bool((thinking_text or "").strip())
-        has_output = bool((dialogue_output_text or "").strip())
-        run_badges = [
-            bilingual_text("Tool Call", "工具呼叫")
-            + ": "
-            + bilingual_text("yes" if has_tool_call else "no", "有" if has_tool_call else "無"),
-            bilingual_text("Thinking", "Thinking 內容")
-            + ": "
-            + bilingual_text("yes" if has_thinking else "no", "有" if has_thinking else "無"),
-            bilingual_text("Output", "輸出內容")
-            + ": "
-            + bilingual_text("yes" if has_output else "no", "有" if has_output else "無"),
-            bilingual_text("thinking_mode", "思考模式")
-            + ": "
-            + localize_thinking_mode_value(thinking_mode),
-            bilingual_text("status", "狀態") + ": " + localize_status_value(row["Status"]),
-        ]
 
         detail_rows = [
             (bilingual_text("Status", "狀態"), localize_status_value(row["Status"])),
@@ -4881,26 +5259,55 @@ th {
             (bilingual_text("Params", "參數"), params_json),
             (bilingual_text("Applied Params", "實際套用參數"), applied_params_json),
             (bilingual_text("Retained Sections", "保留區塊"), retained_sections_label),
+            (
+                bilingual_text("Prompt Tokens", "提示詞 Token 數"),
+                format_token_count(row.get("Prompt_Tokens")),
+            ),
             (bilingual_text("Thinking Chars", "思考字數"), int(row.get("Thinking_Chars", len(thinking_text)))),
-            (bilingual_text("Thinking Tokens", "思考 token 數"), int(row.get("Thinking_Tokens", estimate_token_count(thinking_text)))),
+            (
+                bilingual_text("Thinking Tokens", "思考 Token 數"),
+                format_token_count(
+                    row.get("Thinking_Tokens"),
+                    estimate_token_count(thinking_text),
+                ),
+            ),
+            (
+                bilingual_text("Answer Tokens", "回答 Token 數"),
+                format_token_count(
+                    row.get("Answer_Tokens"),
+                    estimate_token_count(dialogue_output_text),
+                ),
+            ),
+            (
+                bilingual_text("Completion Tokens", "完成 Token 數"),
+                format_token_count(row.get("Completion_Tokens")),
+            ),
+            (
+                bilingual_text("Total Tokens", "總 Token 數"),
+                format_token_count(row.get("Total_Tokens")),
+            ),
+            (
+                bilingual_text("Token Count Source", "Token 計數來源"),
+                format_text_value(row.get("Token_Count_Source")),
+            ),
             (
                 bilingual_text("Dialogue Output Chars", "對話輸出字數"),
                 int(row.get("Dialogue_Output_Chars", len(dialogue_output_text))),
             ),
             (
-                bilingual_text("Dialogue Output Tokens", "對話輸出 token 數"),
-                int(row.get("Dialogue_Output_Tokens", estimate_token_count(dialogue_output_text))),
-            ),
-            (bilingual_text("Thinking Time", "思考時間"), f"{format_numeric_value(row.get('Thinking_Time_s'), 3)} s"),
-            (bilingual_text("Output Time", "回覆時間"), f"{format_numeric_value(row.get('Output_Time_s'), 3)} s"),
-            (
-                bilingual_text("Total Output Time", "總輸出時間"),
-                f"{format_numeric_value(row.get('Total_Output_Time_s'), 3)} s",
+                bilingual_text("Dialogue Output Tokens", "對話輸出 Token 數"),
+                format_token_count(
+                    row.get("Dialogue_Output_Tokens"),
+                    estimate_token_count(dialogue_output_text),
+                ),
             ),
             (bilingual_text("TPS", "輸出速率"), f"{format_numeric_value(row['TPS'], 2)} chunk/s"),
-            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} token/s"),
-            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} token/s"),
+            (bilingual_text("Prefill TPS", "預填充速率"), f"{format_numeric_value(row.get('Prefill_TPS'), 2)} tok/s"),
+            (bilingual_text("Thinking TPS", "思考速率"), f"{format_numeric_value(row.get('Thinking_TPS'), 2)} tok/s"),
+            (bilingual_text("Output TPS", "回覆速率"), f"{format_numeric_value(row.get('Output_TPS'), 2)} tok/s"),
             (bilingual_text("Output/Thinking Ratio", "輸出思考比"), format_numeric_value(row.get("Output_Thinking_Ratio"), 3)),
+            (bilingual_text("Thinking Time", "思考時間"), f"{format_numeric_value(row.get('Thinking_Time_s'), 3)} s"),
+            (bilingual_text("Answer Time", "回答時間"), f"{format_numeric_value(row.get('Answer_Time_s'), 3)} s"),
             (bilingual_text("TTFT", "首字延遲"), f"{format_numeric_value(row['TTFT'], 3)} s"),
             (bilingual_text("First Event", "首事件時間"), f"{format_numeric_value(row['First_Event_s'], 3)} s"),
             (bilingual_text("Stream Duration", "串流總時長"), f"{format_numeric_value(row['Stream_Duration_s'], 3)} s"),
@@ -4917,23 +5324,30 @@ th {
                 f"{format_numeric_value(row['Efficiency_Score'], 3)} TPS/GiB Peak",
             ),
         ]
+        if row.get("Question_ID"):
+            detail_rows[2:2] = [
+                (bilingual_text("Suite ID", "套裝識別碼"), row.get("Suite_ID", "")),
+                (bilingual_text("Suite Version", "套裝版本"), row.get("Suite_Version", "")),
+                (bilingual_text("Question ID", "題目識別碼"), row.get("Question_ID", "")),
+                (
+                    bilingual_text("Question Category", "題目分類"),
+                    QUESTION_CATEGORY_BILINGUAL_MAP.get(
+                        row.get("Question_Category"),
+                        row.get("Question_Category", ""),
+                    ),
+                ),
+                (bilingual_text("Question Title", "題目名稱"), row.get("Question_Title", "")),
+                (bilingual_text("Question Prompt", "題目內容"), row.get("Question_Prompt", "")),
+                (bilingual_text("Expected Output", "預期輸出"), row.get("Expected_Output", "")),
+                (bilingual_text("Evaluation Guide", "評估提示"), row.get("Evaluation_Guide", "")),
+            ]
         if row["Error"]:
             detail_rows.append((bilingual_text("Error", "錯誤"), row["Error"]))
 
         page_parts.extend(
             [
-                (
-                    '<article class="run-card result-card" '
-                    f'data-tool-call="{"yes" if has_tool_call else "no"}" '
-                    f'data-thinking="{"yes" if has_thinking else "no"}" '
-                    f'data-output="{"yes" if has_output else "no"}" '
-                    f'data-thinking-mode="{thinking_mode}" '
-                    f'data-status="{row["Status"]}">'
-                ),
-                f"<h3>{bilingual_text('Run ' + str(row['Run_ID']), f'第 {row['Run_ID']} 次執行')}</h3>",
-                '<div class="run-badges">' + "".join(
-                    f'<span class="run-badge">{html_escape_text(badge)}</span>' for badge in run_badges
-                ) + "</div>",
+                '<article class="run-card">',
+                f"<h3>{bilingual_text('Run ' + str(row['Run_ID']), '第 ' + str(row['Run_ID']) + ' 次執行')}</h3>",
                 key_value_rows_to_html_table(detail_rows),
             ]
         )
@@ -4961,7 +5375,7 @@ th {
 
         page_parts.append("</article>")
 
-    page_parts.extend(["</div>", "</section>", build_run_filter_script(), "</main>", "</body>", "</html>"])
+    page_parts.extend(["</div>", "</section>", "</main>", "</body>", "</html>"])
 
     with report_path.open("w", encoding="utf-8") as file:
         file.write("\n".join(page_parts))
@@ -4980,6 +5394,15 @@ CAPABILITY_DEFAULTS = {
     "tools": (
         "Check today's weather in Taipei. If you support tools or function calling, "
         "call the `lookup_weather` tool first instead of answering directly."
+    ),
+    "suite-smoke-7": (
+        "Built-in suite-smoke-7 uses seven fixed questions. / "
+        "內建 suite-smoke-7 會依序執行七道固定題目。"
+    ),
+    LOCAL_EXPERT_BATTLE_SUITE_ID: (
+        "Built-in Local Expert Battle runs 48 fixed questions: PLC, engineering calculations, "
+        "Traditional Chinese context, and long summaries grounded in ~/wiki. / "
+        "內建 Local Expert Battle 會執行 48 題固定題目，長文摘要直接擷取 ~/wiki。"
     ),
 }
 
@@ -5032,9 +5455,6 @@ def build_param_rows(backend):
     rows = []
     for key in ordered_param_keys():
         info = PARAM_INFO[key]
-        supported = backend in info["backends"]
-        if not supported:
-            continue
         rows.append(
             ParamGridRow(
                 key=key,
@@ -5042,7 +5462,7 @@ def build_param_rows(backend):
                 label=info["label"],
                 range_text=info["range"],
                 desc=info["desc"],
-                supported=supported,
+                supported=backend in info["backends"],
                 default_value=str(info["default"]),
                 raw_value=str(info["default"]),
             )
@@ -5092,7 +5512,7 @@ def row_value_count(row):
         return "ERR"
 
 
-def build_grid_fragments(rows, selected_row_index, selected_column_index, message, message_style, backend):
+def build_grid_fragments(rows, selected_row_index, selected_column_index, message, message_style):
     from prompt_toolkit.formatted_text import to_formatted_text
 
     selected_row = rows[selected_row_index]
@@ -5100,34 +5520,29 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
     combo_count = "ERR" if preview_error else str(estimate_combo_count(preview_params or {}))
     selected_count = sum(1 for row in rows if row.supported and row.enabled)
     active_column_name = "state" if selected_column_index == 0 else "values"
-    backend_label = get_backend_display_name(backend)
 
     fragments = []
     fragments.extend(
         to_formatted_text(
             [
-                ("class:title", f"LLM Benchmark / LLM 基準測試 | {backend_label} Parameter Grid / {backend_label} 參數表\n"),
+                ("class:title", "LLM Benchmark | Full-Page Parameter Grid\n"),
                 (
                     "class:subtitle",
-                    "Arrow keys move / 方向鍵移動 | Left/Right switch cell / 左右切換欄位 | "
-                    "Space toggles N/A/TEST / Space 切換 N/A 或 TEST | "
-                    "Type values in Values / 在 Values 欄輸入測試值 | "
-                    "Backspace deletes or goes back from State / Backspace 刪字或在 State 欄返回上一階段 | "
-                    "d restores default / d 恢復預設值 | Enter/Ctrl-S saves / Enter 或 Ctrl-S 儲存 | "
-                    "Esc cancels / Esc 取消\n\n",
+                    "Arrow keys move | Left/Right switch cell | Space toggles N/A/TEST | "
+                    "Type values in Values (numbers or enable/disable) | Backspace deletes or goes back from State | "
+                    "d restores default | Enter/Ctrl-S saves | Esc cancels\n\n",
                 ),
-                ("class:panel.label", f"Backend View / 目前頁面: {backend_label} | Available Params / 可調參數數: {len(rows)}\n\n"),
             ]
         )
     )
 
     header_cells = {
         "idx": "#",
-        "param_key": "Param / 參數",
-        "state": "State / 狀態",
-        "count": "Count / 數量",
-        "values": "Values / 值",
-        "range_text": "Range / 範圍",
+        "param_key": "Param Key",
+        "state": "State",
+        "count": "Count",
+        "values": "Values",
+        "range_text": "Range",
     }
     for column_name, width in TABLE_COLUMNS:
         fragments.append(("class:table.header", truncate_text(header_cells[column_name], width)))
@@ -5142,7 +5557,7 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
             row_style = "class:table.row.selected"
 
         state_text = "LOCK" if not row.supported else "TEST" if row.enabled else "N/A"
-        value_text = "unsupported / 不支援" if not row.supported else row.raw_value if row.enabled else "N/A"
+        value_text = "backend n/a" if not row.supported else row.raw_value if row.enabled else "N/A"
         cell_values = {
             "idx": f"{row_index + 1:02d}",
             "param_key": row.key,
@@ -5166,17 +5581,17 @@ def build_grid_fragments(rows, selected_row_index, selected_column_index, messag
         to_formatted_text(
             [
                 ("", "\n"),
-                ("class:panel.title", "Selected Parameter / 目前參數\n"),
-                ("class:panel.label", f"Key / 參數鍵: {selected_row.key}\n"),
-                ("class:panel.label", f"Label / 名稱: {selected_row.label}\n"),
-                ("class:panel.label", f"Group / 群組: {selected_row.group}\n"),
-                ("class:panel.label", f"Supported Backends / 支援後端: {support_text}\n"),
-                ("class:panel.label", f"Default Values / 預設值: {selected_row.default_value}\n"),
-                ("class:panel.label", f"Description / 說明: {selected_row.desc}\n\n"),
-                ("class:panel.title", "Config Preview / 設定預覽\n"),
-                ("class:panel.label", f"Selected Params / 已選參數數: {selected_count}\n"),
-                ("class:panel.label", f"Combination Count / 組合數: {combo_count}\n"),
-                (status_style, f"Validation / 驗證: {'OK / 正常' if not preview_error else preview_error}\n"),
+                ("class:panel.title", "Selected Parameter\n"),
+                ("class:panel.label", f"Key: {selected_row.key}\n"),
+                ("class:panel.label", f"Label: {selected_row.label}\n"),
+                ("class:panel.label", f"Groups: {selected_row.group}\n"),
+                ("class:panel.label", f"Supports: {support_text}\n"),
+                ("class:panel.label", f"Default values: {selected_row.default_value}\n"),
+                ("class:panel.label", f"Description: {selected_row.desc}\n\n"),
+                ("class:panel.title", "Config Preview\n"),
+                ("class:panel.label", f"Selected params: {selected_count}\n"),
+                ("class:panel.label", f"Combination count: {combo_count}\n"),
+                (status_style, f"Validation: {'OK' if not preview_error else preview_error}\n"),
             ]
         )
     )
@@ -5227,47 +5642,32 @@ def edit_param_grid(backend, initial_params=None):
     def toggle_current_row():
         row = current_row()
         if not row.supported:
-            set_message(
-                f"{row.key} is not supported on {backend}. / {row.key} 不支援 {backend}。",
-                "class:status.warning",
-            )
+            set_message(f"{row.key} is not supported on {backend}.", "class:status.warning")
             return
 
         row.enabled = not row.enabled
         if row.enabled and not row.raw_value.strip():
             row.raw_value = row.default_value
-        set_message(
-            f"{row.key} -> {'TEST' if row.enabled else 'N/A'} / {row.key} 已切換為 {'測試' if row.enabled else '不測試'}",
-            "class:hint",
-        )
+        set_message(f"{row.key} -> {'TEST' if row.enabled else 'N/A'}", "class:hint")
 
     def restore_default():
         row = current_row()
         if not row.supported:
-            set_message(
-                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
-                "class:status.warning",
-            )
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
             return
 
         row.enabled = True
         row.raw_value = row.default_value
-        set_message(
-            f"{row.key} restored to default values. / {row.key} 已恢復預設值。",
-            "class:hint",
-        )
+        set_message(f"{row.key} restored to default values.", "class:hint")
 
     def append_value(char):
         row = current_row()
         if not row.supported:
-            set_message(
-                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
-                "class:status.warning",
-            )
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
             return
 
         if char not in ALLOWED_VALUE_CHARS:
-            set_message(f"Unsupported character: {char!r} / 不支援的字元：{char!r}", "class:status.warning")
+            set_message(f"Unsupported character: {char!r}", "class:status.warning")
             return
 
         if not row.enabled:
@@ -5275,28 +5675,22 @@ def edit_param_grid(backend, initial_params=None):
             if row.raw_value == "N/A":
                 row.raw_value = ""
         row.raw_value += char
-        set_message(f"Editing {row.key} / 正在編輯 {row.key}", "class:hint")
+        set_message(f"Editing {row.key}", "class:hint")
 
     def backspace_value():
         row = current_row()
         if not row.supported:
-            set_message(
-                f"{row.key} is locked for {backend}. / {row.key} 在 {backend} 上已鎖定。",
-                "class:status.warning",
-            )
+            set_message(f"{row.key} is locked for {backend}.", "class:status.warning")
             return
 
         if not row.enabled:
             row.enabled = True
             row.raw_value = row.default_value
-            set_message(
-                f"{row.key} enabled with default values. / {row.key} 已啟用並帶入預設值。",
-                "class:hint",
-            )
+            set_message(f"{row.key} enabled with default values.", "class:hint")
             return
 
         row.raw_value = row.raw_value[:-1]
-        set_message(f"Editing {row.key} / 正在編輯 {row.key}", "class:hint")
+        set_message(f"Editing {row.key}", "class:hint")
 
     def accept(event):
         params, error_row_index, error_message = validate_param_rows(rows)
@@ -5315,7 +5709,6 @@ def edit_param_grid(backend, initial_params=None):
             selected_column_index=state["column_index"],
             message=state["message"],
             message_style=state["message_style"],
-            backend=backend,
         ),
         focusable=True,
         show_cursor=False,
@@ -5392,7 +5785,7 @@ def edit_param_grid(backend, initial_params=None):
         if state["column_index"] == 1:
             current_row().raw_value = ""
             current_row().enabled = True
-            set_message(f"Cleared {current_row().key}. / 已清空 {current_row().key}。", "class:hint")
+            set_message(f"Cleared {current_row().key}.", "class:hint")
             refresh(event)
 
     @kb.add("d")
@@ -5443,9 +5836,8 @@ def parse_system_prompt_blocks(raw_text, expected_count):
     ]
     if len(blocks) != expected_count:
         raise ValueError(
-            f"Expected {expected_count} system prompt blocks, but found {len(blocks)}. / "
-            f"預期應有 {expected_count} 段 system prompt，但目前找到 {len(blocks)} 段。"
-            " Use a line containing only --- between prompts. / 請用單獨一行的 --- 分隔不同 prompt。"
+            f"Expected {expected_count} system prompt blocks, but found {len(blocks)}. "
+            "Use a line containing only --- between prompts."
         )
     return blocks
 
@@ -5469,8 +5861,7 @@ def edit_system_prompt_blocks(expected_count):
     state = {
         "message": (
             f"Paste {expected_count} system prompt block(s). Use --- on its own line as a separator. "
-            f"Ctrl-S saves, Esc cancels. / 請貼上 {expected_count} 段 system prompt，段落之間用單獨一行的 --- 分隔。"
-            "Ctrl-S 儲存，Esc 取消。"
+            "Ctrl-S saves, Esc cancels."
         ),
         "style": "class:hint",
     }
@@ -5654,7 +6045,7 @@ def select_system_prompt_variants(existing_prompts=None):
         if selection == "custom":
             while True:
                 raw_count = ask_text_with_back(
-                    "How many system prompt variants? / 要測幾種 system prompt 變體？",
+                    "How many system prompt variants? / 要測幾種 system prompt？",
                     default=str(len(existing_prompts) or 1),
                 )
                 if raw_count is None:
@@ -5664,10 +6055,10 @@ def select_system_prompt_variants(existing_prompts=None):
                 try:
                     expected_count = int((raw_count or "").strip())
                 except ValueError:
-                    print("System prompt count must be an integer. / system prompt 變體數量必須是整數。")
+                    print("System prompt count must be an integer. / system prompt 數量必須是整數。")
                     continue
                 if expected_count < 0:
-                    print("System prompt count cannot be negative. / system prompt 變體數量不能小於 0。")
+                    print("System prompt count cannot be negative. / system prompt 數量不能小於 0。")
                     continue
                 if expected_count == 0:
                     return []
@@ -5677,7 +6068,7 @@ def select_system_prompt_variants(existing_prompts=None):
 
         prompts = edit_system_prompt_blocks(expected_count)
         if prompts is None:
-            print("System prompt editor was cancelled. / system prompt 編輯已取消。")
+            print("System prompt editor cancelled. / system prompt 編輯已取消。")
             return None
         if prompts == BACK_ACTION:
             continue
@@ -5688,66 +6079,2623 @@ def print_config_review(config):
     params = config["params"]
     combo_count = estimate_combo_count(params) if params else 1
     system_prompt_variants = build_system_prompt_variants(config.get("system_prompts", []))
+    questions = resolve_benchmark_questions(config)
+    total_run_count = (
+        len(config["models"]) * combo_count * len(system_prompt_variants) * len(questions)
+    )
 
     print("\n" + "=" * 62)
-    print("Config Review / 設定確認")
+    print("Config Review")
     print("=" * 62)
-    print(f"- Backend / 後端: {config['backend']}")
-    print(f"- Benchmark Mode / 測試模式: {config['capability']}")
-    print(f"- Base URL / 基礎 URL: {config['url']}")
-    print(f"- Models / 模型: {', '.join(config['models'])}")
-    print(f"- Param Count / 參數數量: {len(params)}")
-    print(f"- Combination Count / 組合數: {combo_count}")
-    print(f"- System Prompt Variants / System Prompt 變體數: {len(system_prompt_variants)}")
+    print(f"- Backend: {config['backend']}")
+    print(f"- Capability: {config['capability']}")
+    print(f"- Base URL: {config['url']}")
+    print(f"- Models: {', '.join(config['models'])}")
+    print(f"- Param count: {len(params)}")
+    print(f"- Combination count: {combo_count}")
+    print(f"- Questions per combination: {len(questions)}")
+    print(f"- Total runs: {total_run_count}")
+    print(f"- System prompt variants: {len(system_prompt_variants)}")
     if params:
-        print("- Parameter Values / 參數值:")
+        print("- Parameter values:")
         for key, values in params.items():
             print(f"  - {key}: {values}")
     else:
-        print("- Parameter Values / 參數值: use backend defaults only / 僅使用後端預設值")
+        print("- Parameter values: use backend defaults only")
     if system_prompt_variants[0]["label"] == "N/A" and len(system_prompt_variants) == 1:
-        print("- System Prompts / System Prompt: N/A / 未額外加入")
+        print("- System prompts: N/A")
     else:
-        print("- System Prompt Previews / System Prompt 預覽:")
+        print("- System prompt previews:")
         for variant in system_prompt_variants:
             preview = variant["text"].splitlines()[0] if variant["text"] else ""
             preview = preview[:90] + ("..." if len(preview) > 90 else "")
-            print(f"  - {variant['label']}: {preview} ({len(variant['text'])} chars / 字元)")
+            print(f"  - {variant['label']}: {preview} ({len(variant['text'])} chars)")
 
 
 def build_console_summary_dataframe(results_df):
-    def console_column_name(column_name):
-        return REPORT_HEADER_BILINGUAL_MAP.get(column_name, column_name).replace("<br>", " / ")
-
-    summary_df = localize_report_dataframe(build_summary_dataframe(results_df))
-    summary_df = summary_df.rename(columns=lambda column_name: column_name.replace("<br>", " / "))
-
-    console_columns = [console_column_name("Run"), console_column_name("Status")]
-    if console_column_name("Capability") in summary_df.columns:
-        console_columns.append(console_column_name("Capability"))
-    if console_column_name("System Prompt") in summary_df.columns:
-        console_columns.append(console_column_name("System Prompt"))
+    summary_df = build_summary_dataframe(results_df)
+    console_columns = ["Run", "Status"]
+    if "Capability" in summary_df.columns:
+        console_columns.append("Capability")
+    for question_column in ("Question ID", "Question Category", "Question Title"):
+        if question_column in summary_df.columns:
+            console_columns.append(question_column)
+    if "System Prompt" in summary_df.columns:
+        console_columns.append("System Prompt")
     console_columns.extend(
         [
-            console_column_name("Output Category"),
-            console_column_name("Finish Reason"),
-            console_column_name("Model"),
-            console_column_name("TPS (chunk/s)"),
-            console_column_name("Thinking TPS (token/s)"),
-            console_column_name("Output TPS (token/s)"),
-            console_column_name("Output/Thinking Ratio"),
-            console_column_name("TTFT (s)"),
-            console_column_name("First Event (s)"),
-            console_column_name("Chunks (content/total)"),
-            console_column_name("Config"),
+            "Output Category",
+            "Finish Reason",
+            "Model",
+            "Prompt Tokens",
+            "Thinking Tokens",
+            "Answer Tokens",
+            "Completion Tokens",
+            "Total Tokens",
+            "Token Count Source",
+            "Thinking Time (s)",
+            "Answer Time (s)",
+            "Prefill TPS (tok/s)",
+            "TPS (chunk/s)",
+            "Thinking TPS (tok/s)",
+            "Output TPS (tok/s)",
+            "Output/Thinking Ratio",
+            "TTFT (s)",
+            "First Event (s)",
+            "Chunks (content/total)",
+            "Config",
         ]
     )
     return summary_df[console_columns]
 
 
+UI_DEFAULTS_FILENAME = "llm_expert_bench_ui_defaults.json"
+SUPPORTED_BACKENDS = ("ollama", "llama.cpp")
+DEFAULT_BACKEND = "llama.cpp"
+
+
+def get_ui_defaults_file_path():
+    return Path(UI_DEFAULTS_FILENAME)
+
+
+def get_builtin_base_url(backend):
+    return "http://localhost:11434/v1" if backend == "ollama" else "http://localhost:8080/v1"
+
+
+def format_system_prompts_for_textarea(system_prompts):
+    prompts = [str(item).strip() for item in (system_prompts or []) if str(item).strip()]
+    if not prompts:
+        return ""
+    return f"\n{SYSTEM_PROMPT_BLOCK_SEPARATOR}\n".join(prompts)
+
+
+def build_builtin_ui_defaults():
+    return {
+        "default_backend": DEFAULT_BACKEND,
+        "default_capability": "chat",
+        "backend_defaults": {
+            backend: {
+                "url": get_builtin_base_url(backend),
+                "models": "",
+                "params": {
+                    row.key: {"enabled": False, "raw_value": row.default_value}
+                    for row in build_param_rows(backend)
+                    if row.supported
+                },
+            }
+            for backend in SUPPORTED_BACKENDS
+        },
+        "capability_defaults": {
+            capability: {
+                "prompt": prompt_text,
+                "system_prompts": [],
+            }
+            for capability, prompt_text in CAPABILITY_DEFAULTS.items()
+        },
+    }
+
+
+def normalize_ui_defaults_payload(payload):
+    builtin_defaults = build_builtin_ui_defaults()
+    if not isinstance(payload, dict):
+        payload = {}
+
+    default_backend = payload.get("default_backend", builtin_defaults["default_backend"])
+    if default_backend not in SUPPORTED_BACKENDS:
+        default_backend = builtin_defaults["default_backend"]
+
+    default_capability = payload.get("default_capability", builtin_defaults["default_capability"])
+    if default_capability not in CAPABILITY_DEFAULTS:
+        default_capability = builtin_defaults["default_capability"]
+
+    raw_backend_defaults = payload.get("backend_defaults")
+    if not isinstance(raw_backend_defaults, dict):
+        raw_backend_defaults = {}
+
+    normalized_backend_defaults = {}
+    for backend in SUPPORTED_BACKENDS:
+        builtin_backend_defaults = builtin_defaults["backend_defaults"][backend]
+        submitted_backend_defaults = raw_backend_defaults.get(backend)
+        if not isinstance(submitted_backend_defaults, dict):
+            submitted_backend_defaults = {}
+
+        normalized_param_defaults = {}
+        submitted_param_defaults = submitted_backend_defaults.get("params")
+        if not isinstance(submitted_param_defaults, dict):
+            submitted_param_defaults = {}
+
+        rows = build_param_rows(backend)
+        for row in rows:
+            if not row.supported:
+                continue
+            submitted_row_defaults = submitted_param_defaults.get(row.key)
+            if not isinstance(submitted_row_defaults, dict):
+                submitted_row_defaults = {}
+            raw_value = str(submitted_row_defaults.get("raw_value") or row.default_value).strip()
+            normalized_param_defaults[row.key] = {
+                "enabled": bool(submitted_row_defaults.get("enabled")),
+                "raw_value": raw_value or row.default_value,
+            }
+
+        normalized_backend_defaults[backend] = {
+            "url": str(submitted_backend_defaults.get("url") or builtin_backend_defaults["url"]).strip()
+            or builtin_backend_defaults["url"],
+            "models": ", ".join(split_model_names(submitted_backend_defaults.get("models"))),
+            "params": normalized_param_defaults,
+        }
+
+    raw_capability_defaults = payload.get("capability_defaults")
+    if not isinstance(raw_capability_defaults, dict):
+        raw_capability_defaults = {}
+
+    normalized_capability_defaults = {}
+    for capability, builtin_values in builtin_defaults["capability_defaults"].items():
+        submitted_capability_defaults = raw_capability_defaults.get(capability)
+        if not isinstance(submitted_capability_defaults, dict):
+            submitted_capability_defaults = {}
+        raw_system_prompts = submitted_capability_defaults.get("system_prompts", builtin_values["system_prompts"])
+        if isinstance(raw_system_prompts, str):
+            normalized_system_prompts = parse_system_prompt_text(raw_system_prompts)
+        elif isinstance(raw_system_prompts, list):
+            normalized_system_prompts = [
+                str(item).strip() for item in raw_system_prompts if str(item).strip()
+            ]
+        else:
+            normalized_system_prompts = list(builtin_values["system_prompts"])
+
+        normalized_capability_defaults[capability] = {
+            "prompt": str(submitted_capability_defaults.get("prompt") or builtin_values["prompt"]).strip()
+            or builtin_values["prompt"],
+            "system_prompts": normalized_system_prompts,
+        }
+
+    return {
+        "default_backend": default_backend,
+        "default_capability": default_capability,
+        "backend_defaults": normalized_backend_defaults,
+        "capability_defaults": normalized_capability_defaults,
+    }
+
+
+def validate_ui_defaults_payload(payload):
+    normalized = normalize_ui_defaults_payload(payload)
+    for backend in SUPPORTED_BACKENDS:
+        rows = build_param_rows(backend)
+        backend_param_defaults = normalized["backend_defaults"][backend]["params"]
+        for row in rows:
+            if not row.supported:
+                row.enabled = False
+                row.raw_value = row.default_value
+                continue
+            submitted_defaults = backend_param_defaults.get(row.key, {})
+            row.enabled = bool(submitted_defaults.get("enabled"))
+            row.raw_value = str(submitted_defaults.get("raw_value") or row.default_value).strip()
+            if row.enabled and not row.raw_value:
+                row.raw_value = row.default_value
+        _, _, error_message = validate_param_rows(rows)
+        if error_message:
+            raise ValueError(f"{backend}: {error_message}")
+    return normalized
+
+
+def load_ui_defaults():
+    defaults_path = get_ui_defaults_file_path()
+    if not defaults_path.exists():
+        return build_builtin_ui_defaults()
+    try:
+        payload = json.loads(defaults_path.read_text(encoding="utf-8"))
+    except Exception:
+        return build_builtin_ui_defaults()
+    try:
+        return validate_ui_defaults_payload(payload)
+    except Exception:
+        return build_builtin_ui_defaults()
+
+
+def save_ui_defaults(payload):
+    normalized = validate_ui_defaults_payload(payload)
+    defaults_path = get_ui_defaults_file_path()
+    defaults_path.write_text(
+        json.dumps(normalized, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return normalized
+
+
+def reset_ui_defaults():
+    defaults = build_builtin_ui_defaults()
+    return save_ui_defaults(defaults)
+
+
+def get_default_base_url(backend, ui_defaults=None):
+    normalized_backend = backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND
+    defaults = ui_defaults or load_ui_defaults()
+    return (
+        str(
+            defaults.get("backend_defaults", {})
+            .get(normalized_backend, {})
+            .get("url", get_builtin_base_url(normalized_backend))
+        ).strip()
+        or get_builtin_base_url(normalized_backend)
+    )
+
+
+def get_default_models_text(backend, ui_defaults=None):
+    normalized_backend = backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND
+    defaults = ui_defaults or load_ui_defaults()
+    return str(
+        defaults.get("backend_defaults", {})
+        .get(normalized_backend, {})
+        .get("models", "")
+    ).strip()
+
+
+def get_default_prompt_for_capability(capability, ui_defaults=None):
+    normalized_capability = capability if capability in CAPABILITY_DEFAULTS else "chat"
+    defaults = ui_defaults or load_ui_defaults()
+    capability_defaults = defaults.get("capability_defaults", {}).get(normalized_capability, {})
+    return str(capability_defaults.get("prompt") or CAPABILITY_DEFAULTS[normalized_capability]).strip()
+
+
+def get_default_system_prompts_for_capability(capability, ui_defaults=None):
+    normalized_capability = capability if capability in CAPABILITY_DEFAULTS else "chat"
+    defaults = ui_defaults or load_ui_defaults()
+    system_prompts = defaults.get("capability_defaults", {}).get(normalized_capability, {}).get(
+        "system_prompts", []
+    )
+    if not isinstance(system_prompts, list):
+        return []
+    return [str(item).strip() for item in system_prompts if str(item).strip()]
+
+
+def split_model_names(raw_models):
+    if isinstance(raw_models, list):
+        return [str(item).strip() for item in raw_models if str(item).strip()]
+    return [name.strip() for name in str(raw_models or "").split(",") if name.strip()]
+
+
+def parse_system_prompt_text(raw_text):
+    normalized = (raw_text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+    return [
+        block.strip()
+        for block in re.split(r"(?m)^\s*---\s*$", normalized)
+        if block.strip()
+    ]
+
+
+def serialize_param_rows_for_ui(backend, initial_params=None, row_overrides=None):
+    rows = build_param_rows(backend)
+    for row in rows:
+        override_values = (row_overrides or {}).get(row.key, {})
+        if row.supported and isinstance(override_values, dict):
+            row.enabled = bool(override_values.get("enabled"))
+            row.raw_value = str(override_values.get("raw_value") or row.default_value).strip() or row.default_value
+        if initial_params and row.key in initial_params:
+            row.enabled = True
+            row.raw_value = format_param_values_for_display(row.key, initial_params[row.key])
+    return [
+        {
+            "key": row.key,
+            "group": row.group,
+            "label": row.label,
+            "range_text": row.range_text,
+            "desc": row.desc,
+            "supported": row.supported,
+            "default_value": row.default_value,
+            "enabled": row.enabled,
+            "raw_value": row.raw_value,
+        }
+        for row in rows
+    ]
+
+
+def build_web_ui_backend_state(backend, initial_params=None, ui_defaults=None):
+    normalized_backend = backend if backend in SUPPORTED_BACKENDS else DEFAULT_BACKEND
+    defaults = ui_defaults or load_ui_defaults()
+    backend_defaults = defaults.get("backend_defaults", {}).get(normalized_backend, {})
+    is_llama_cpp = normalized_backend == "llama.cpp"
+    detected_models = get_llama_cpp_models() if is_llama_cpp else get_ollama_models()
+    return {
+        "backend": normalized_backend,
+        "default_url": get_default_base_url(normalized_backend, ui_defaults=defaults),
+        "default_models_text": get_default_models_text(normalized_backend, ui_defaults=defaults),
+        "detected_models": detected_models,
+        "model_catalog_label": (
+            "easy_llamacpp GGUF Catalog / easy_llamacpp GGUF 模型目錄"
+            if is_llama_cpp
+            else "Detected Ollama Models / 偵測到的 Ollama 模型"
+        ),
+        "model_catalog_note": (
+            f"讀取 {get_llama_cpp_launcher_root() / 'json' / 'model-index.json'}；"
+            "按 Refresh 重新讀取。若不勾選模型，會直接測試 Base URL 目前已載入的 llama.cpp 模型。"
+            if is_llama_cpp
+            else "Click a detected model to add it to the benchmark list. / 點選模型即可加入測試清單。"
+        ),
+        "param_rows": serialize_param_rows_for_ui(
+            normalized_backend,
+            initial_params=initial_params,
+            row_overrides=backend_defaults.get("params"),
+        ),
+    }
+
+
+def summarize_config_for_ui(config):
+    params = config.get("params", {}) or {}
+    question_count = len(resolve_benchmark_questions(config))
+    param_combination_count = estimate_combo_count(params) if params else 1
+    system_prompt_count = max(1, len(config.get("system_prompts", []) or []))
+    return {
+        "backend": config.get("backend", DEFAULT_BACKEND),
+        "capability": config.get("capability", "chat"),
+        "url": config.get("url", ""),
+        "models": config.get("models", []),
+        "param_count": len(params),
+        "combination_count": param_combination_count,
+        "question_count": question_count,
+        "estimated_run_count": (
+            len(config.get("models", []))
+            * param_combination_count
+            * system_prompt_count
+            * question_count
+        ),
+        "prompt_length": len(config.get("prompt", "")),
+        "system_prompt_count": len(config.get("system_prompts", []) or []),
+        "use_current_llama_cpp_model": bool(config.get("use_current_llama_cpp_model")),
+        "llama_cpp_auto_switch": bool(config.get("llama_cpp_auto_switch")),
+    }
+
+
+def normalize_web_ui_config(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid request payload.")
+
+    ui_defaults = load_ui_defaults()
+
+    backend = payload.get("backend", DEFAULT_BACKEND)
+    if backend not in ("ollama", "llama.cpp"):
+        raise ValueError("Unsupported backend.")
+
+    capability = payload.get("capability", "chat")
+    if capability not in CAPABILITY_DEFAULTS:
+        raise ValueError("Unsupported benchmark mode.")
+
+    url = str(payload.get("url") or get_default_base_url(backend, ui_defaults=ui_defaults)).strip()
+    if not url:
+        raise ValueError("Base URL is required.")
+
+    selected_models = split_model_names(payload.get("models"))
+    if not selected_models and backend != "llama.cpp":
+        raise ValueError("At least one model is required.")
+    use_current_llama_cpp_model = backend == "llama.cpp" and not selected_models
+    models = selected_models
+    if use_current_llama_cpp_model:
+        models = get_openai_compatible_models(url) or [CURRENT_LLAMA_CPP_MODEL_FALLBACK]
+    llama_cpp_auto_switch = (
+        backend == "llama.cpp"
+        and bool(selected_models)
+        and bool(payload.get("llama_cpp_auto_switch"))
+    )
+    llama_cpp_model_entries = (
+        resolve_llama_cpp_auto_switch_models(models) if llama_cpp_auto_switch else []
+    )
+    if llama_cpp_auto_switch:
+        get_llama_cpp_switch_port(url)
+
+    prompt = str(payload.get("prompt") or "").strip() or get_default_prompt_for_capability(
+        capability, ui_defaults=ui_defaults
+    )
+    if capability in BUILTIN_SUITES or capability == LOCAL_EXPERT_BATTLE_SUITE_ID:
+        prompt = CAPABILITY_DEFAULTS[capability]
+    system_prompts = parse_system_prompt_text(payload.get("system_prompts"))
+    if not system_prompts:
+        system_prompts = get_default_system_prompts_for_capability(capability, ui_defaults=ui_defaults)
+
+    submitted_params = payload.get("params") or {}
+    if not isinstance(submitted_params, dict):
+        raise ValueError("Invalid parameter payload.")
+
+    rows = build_param_rows(backend)
+    for row in rows:
+        if not row.supported:
+            row.enabled = False
+            row.raw_value = row.default_value
+            continue
+
+        submitted_row = submitted_params.get(row.key) or {}
+        row.enabled = bool(submitted_row.get("enabled"))
+        row.raw_value = str(submitted_row.get("raw_value") or row.default_value).strip()
+        if row.enabled and not row.raw_value:
+            row.raw_value = row.default_value
+
+    final_params, _, error_message = validate_param_rows(rows)
+    if error_message:
+        raise ValueError(error_message)
+
+    return {
+        "backend": backend,
+        "capability": capability,
+        "url": url,
+        "models": models,
+        "use_current_llama_cpp_model": use_current_llama_cpp_model,
+        "llama_cpp_auto_switch": llama_cpp_auto_switch,
+        "llama_cpp_model_entries": llama_cpp_model_entries,
+        "params": final_params or {},
+        "prompt": prompt,
+        "system_prompts": system_prompts,
+    }
+
+
+def build_report_file_url(path_or_name):
+    file_name = path_or_name.name if isinstance(path_or_name, Path) else str(path_or_name)
+    return f"/report-files/{quote(file_name)}"
+
+
+def build_artifact_link(label, path):
+    if not path:
+        return None
+    artifact_path = Path(path)
+    if not artifact_path.exists():
+        return None
+    return {
+        "label": label,
+        "name": artifact_path.name,
+        "url": build_report_file_url(artifact_path),
+    }
+
+
+def build_report_entry(report_path):
+    html_path = Path(report_path)
+    if not html_path.exists():
+        return None
+
+    artifact_links = []
+    for label, candidate_path in (
+        ("HTML Report", html_path),
+        ("Chart", html_path.with_suffix(".png")),
+        ("Summary Excel", html_path.with_name(f"{html_path.stem}_summary.xlsx")),
+        ("Raw Outputs", html_path.with_name(f"{html_path.stem}_outputs.jsonl")),
+        ("Best Config", html_path.with_name("best_config.json")),
+        ("Ollama Modelfile", html_path.with_name("Ollama_Modelfile_Suggest")),
+    ):
+        link = build_artifact_link(label, candidate_path)
+        if link:
+            artifact_links.append(link)
+
+    stat = html_path.stat()
+    return {
+        "id": html_path.stem,
+        "title": html_path.stem,
+        "html_name": html_path.name,
+        "html_url": build_report_file_url(html_path),
+        "modified_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+        "modified_ts": stat.st_mtime,
+        "size_kib": round(stat.st_size / 1024, 1),
+        "artifact_links": artifact_links,
+    }
+
+
+def list_report_entries(report_dir=None, limit=30):
+    report_root = Path(report_dir) if report_dir else ensure_report_output_dir()
+    if not report_root.exists():
+        return []
+
+    html_paths = sorted(
+        report_root.glob("bench_*.html"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    entries = []
+    for html_path in html_paths[:limit]:
+        entry = build_report_entry(html_path)
+        if entry:
+            entries.append(entry)
+    return entries
+
+
+def render_local_expert_battle_report(raw_outputs_path, report_stem):
+    script_path = Path(__file__).with_name("report.py")
+    if not script_path.is_file():
+        raise RuntimeError(f"Local Expert Battle reporter is missing: {script_path}")
+    battle_path = Path(f"{report_stem}_battle.html")
+    review_path = Path(f"{report_stem}_manual_review.json")
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--input",
+            str(raw_outputs_path),
+            "--output",
+            str(battle_path),
+            "--review",
+            str(review_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(detail or "report.py exited without a diagnostic")
+    return battle_path, review_path
+
+
+def run_benchmark_workflow(config, progress_callback=None):
+    warnings = []
+
+    def report_progress(message):
+        print(message)
+        if progress_callback:
+            progress_callback(message)
+
+    report_progress("Starting benchmark run...")
+    results_df = run_bench(config)
+    if results_df.empty:
+        raise RuntimeError("No benchmark rows were produced.")
+
+    ok_count = int((results_df["Status"] == "ok").sum())
+    warning_count = int((results_df["Status"] == "warning").sum())
+    error_count = int((results_df["Status"] == "error").sum())
+    capability = config.get("capability", "chat")
+    report_dir = ensure_report_output_dir()
+    report_stem = report_dir / f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
+
+    report_progress("Saving raw outputs...")
+    raw_outputs_path = save_raw_outputs(results_df, report_stem)
+    battle_report_path = None
+    battle_review_path = None
+    if capability == LOCAL_EXPERT_BATTLE_SUITE_ID:
+        try:
+            report_progress("Scoring objective Battle questions and creating manual review template...")
+            battle_report_path, battle_review_path = render_local_expert_battle_report(
+                raw_outputs_path,
+                report_stem,
+            )
+        except Exception as exc:
+            warning_text = f"Battle report generation failed: {exc}"
+            warnings.append(warning_text)
+            print(warning_text)
+
+    console_df = build_console_summary_dataframe(results_df)
+    console_summary_text = dataframe_to_text_table(console_df)
+
+    report_path = None
+    chart_path = None
+    summary_excel_path = None
+    best_config_artifacts = None
+
+    try:
+        report_progress("Exporting summary workbook...")
+        summary_excel_path = save_summary_excel_workbook(results_df, config, report_stem)
+    except Exception as exc:
+        warning_text = f"Summary Excel export failed: {exc}"
+        warnings.append(warning_text)
+        print(warning_text)
+
+    try:
+        report_progress("Rendering HTML report...")
+        report_path = save_markdown_report(
+            results_df,
+            config,
+            report_stem,
+            summary_excel_path=summary_excel_path,
+        )
+    except Exception as exc:
+        warning_text = f"Report generation failed: {exc}"
+        warnings.append(warning_text)
+        print(warning_text)
+
+    try:
+        report_progress("Rendering chart...")
+        chart_path = plot_results(results_df, f"{report_stem}.png", capability=capability)
+    except Exception as exc:
+        warning_text = f"Chart generation failed: {exc}"
+        warnings.append(warning_text)
+        print(warning_text)
+
+    try:
+        report_progress("Exporting best config...")
+        best_config_artifacts = export_best_config(results_df, config, output_dir=report_dir)
+    except Exception as exc:
+        warning_text = f"best_config export failed: {exc}"
+        warnings.append(warning_text)
+        print(warning_text)
+
+    latest_report_entry = build_report_entry(report_path) if report_path else None
+    artifact_links = []
+    for label, path in (
+        ("HTML Report", report_path),
+        ("Battle Result", battle_report_path),
+        ("Manual Review Template", battle_review_path),
+        ("Summary Excel", summary_excel_path),
+        ("Chart", chart_path),
+        ("Raw Outputs", raw_outputs_path),
+    ):
+        link = build_artifact_link(label, path)
+        if link:
+            artifact_links.append(link)
+
+    if best_config_artifacts:
+        for label, path in (
+            ("Best Config", best_config_artifacts.get("best_config_path")),
+            ("Ollama Modelfile", best_config_artifacts.get("modelfile_path")),
+        ):
+            link = build_artifact_link(label, path)
+            if link:
+                artifact_links.append(link)
+
+    report_progress("Benchmark run complete.")
+    return {
+        "config_summary": summarize_config_for_ui(config),
+        "counts": {
+            "ok": ok_count,
+            "warning": warning_count,
+            "error": error_count,
+        },
+        "console_summary_text": console_summary_text,
+        "report_dir": str(report_dir),
+        "warnings": warnings,
+        "artifact_links": artifact_links,
+        "latest_report": latest_report_entry,
+    }
+
+
+class BenchmarkWebUiState:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._job = self._build_idle_job()
+
+    def _build_idle_job(self):
+        return {
+            "id": None,
+            "status": "idle",
+            "message": "Ready. / 就緒。",
+            "error": "",
+            "logs": [],
+            "started_at": None,
+            "ended_at": None,
+            "config_summary": None,
+            "result": None,
+        }
+
+    def snapshot(self):
+        with self._lock:
+            return copy.deepcopy(self._job)
+
+    def start_job(self, config):
+        with self._lock:
+            if self._job.get("status") == "running":
+                raise RuntimeError("A benchmark is already running. / 目前已有 benchmark 正在執行。")
+            job_id = f"job-{int(time.time() * 1000)}"
+            self._job = {
+                "id": job_id,
+                "status": "running",
+                "message": "Preparing benchmark run... / 正在準備 benchmark...",
+                "error": "",
+                "logs": ["Preparing benchmark run... / 正在準備 benchmark..."],
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "ended_at": None,
+                "config_summary": summarize_config_for_ui(config),
+                "result": None,
+            }
+            return job_id
+
+    def append_log(self, job_id, message):
+        with self._lock:
+            if self._job.get("id") != job_id:
+                return
+            self._job["message"] = message
+            self._job["logs"].append(message)
+            self._job["logs"] = self._job["logs"][-120:]
+
+    def complete_job(self, job_id, result):
+        with self._lock:
+            if self._job.get("id") != job_id:
+                return
+            self._job["status"] = "succeeded"
+            self._job["message"] = "Benchmark completed. / Benchmark 已完成。"
+            self._job["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._job["result"] = result
+            self._job["logs"].append("Benchmark completed. / Benchmark 已完成。")
+            self._job["logs"] = self._job["logs"][-120:]
+
+    def fail_job(self, job_id, error_text):
+        with self._lock:
+            if self._job.get("id") != job_id:
+                return
+            self._job["status"] = "failed"
+            self._job["message"] = "Benchmark failed. / Benchmark 失敗。"
+            self._job["error"] = error_text
+            self._job["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._job["logs"].append(error_text)
+            self._job["logs"] = self._job["logs"][-120:]
+
+
+def build_ui_defaults_api_payload(ui_defaults=None):
+    defaults = ui_defaults or load_ui_defaults()
+    return {
+        "ui_defaults": defaults,
+        "ui_defaults_path": str(get_ui_defaults_file_path().resolve()),
+        "backend_catalog": {
+            backend: build_web_ui_backend_state(backend, ui_defaults=defaults)
+            for backend in SUPPORTED_BACKENDS
+        },
+        "capability_defaults": {
+            capability: get_default_prompt_for_capability(capability, ui_defaults=defaults)
+            for capability in CAPABILITY_DEFAULTS
+        },
+        "capability_system_prompt_defaults": {
+            capability: format_system_prompts_for_textarea(
+                get_default_system_prompts_for_capability(capability, ui_defaults=defaults)
+            )
+            for capability in CAPABILITY_DEFAULTS
+        },
+        "default_backend": defaults.get("default_backend", DEFAULT_BACKEND),
+        "default_capability": defaults.get("default_capability", "chat"),
+    }
+
+
+def build_web_ui_bootstrap_payload(app_state):
+    defaults_payload = build_ui_defaults_api_payload()
+    default_backend = defaults_payload["default_backend"]
+    payload = {
+        "app_title": "DIY LLM Benchmark / DIY LLM Benchmark 控制台",
+        "backends": [
+            {"value": "ollama", "label": "Ollama / Ollama"},
+            {"value": "llama.cpp", "label": "llama.cpp / llama.cpp"},
+        ],
+        "capabilities": [
+            {
+                "value": "chat",
+                "label": "Chat / 對話",
+                "description": "Standard response benchmark. / 一般對話輸出 benchmark。",
+            },
+            {
+                "value": "tools",
+                "label": "Tools / 工具呼叫",
+                "description": "Check tool_call output. / 檢查是否輸出 tool_call。",
+            },
+            {
+                "value": "suite-smoke-7",
+                "label": "Suite Smoke 7 / 七項能力套裝",
+                "description": "Seven fixed questions covering core capabilities. / 以七道固定題目涵蓋核心能力。",
+            },
+            {
+                "value": LOCAL_EXPERT_BATTLE_SUITE_ID,
+                "label": "Local Expert Battle 48 / 在地工程專家對戰",
+                "description": "48 questions: PLC, engineering calculations, Traditional Chinese, and ~/wiki summaries. / PLC、工程計算、繁中語境與 ~/wiki 長文摘要各 12 題。",
+            },
+        ],
+        "backend_state": defaults_payload["backend_catalog"][default_backend],
+        "reports": list_report_entries(),
+        "job": app_state.snapshot(),
+    }
+    payload.update(defaults_payload)
+    return payload
+
+
+def build_single_file_benchmark_ui_html():
+    return """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DIY LLM Benchmark / DIY LLM Benchmark 控制台</title>
+  <style>
+    :root {
+      --paper: #f4efe6;
+      --paper-strong: #efe7d8;
+      --ink: #1f2430;
+      --ink-soft: #586274;
+      --panel: rgba(255, 251, 245, 0.92);
+      --panel-strong: rgba(255, 248, 239, 0.98);
+      --line: rgba(59, 45, 30, 0.14);
+      --accent: #bd6741;
+      --accent-strong: #944424;
+      --accent-soft: rgba(189, 103, 65, 0.14);
+      --ok: #2f7d4d;
+      --warn: #b2751a;
+      --danger: #a23b3b;
+      --shadow: 0 24px 60px rgba(43, 34, 24, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 20px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
+      --mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+      --display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", "Noto Serif TC", serif;
+      --body: "Aptos", "Segoe UI", "Noto Sans TC", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      font-family: var(--body);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(189, 103, 65, 0.16), transparent 32%),
+        radial-gradient(circle at 80% 20%, rgba(45, 109, 113, 0.12), transparent 28%),
+        linear-gradient(180deg, #f8f4ed 0%, var(--paper) 100%);
+      letter-spacing: 0.01em;
+    }
+
+    .shell {
+      width: min(1680px, calc(100vw - 40px));
+      margin: 24px auto 40px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+      gap: 22px;
+      padding: 24px 28px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: linear-gradient(135deg, rgba(255,255,255,0.75), rgba(255,247,237,0.92));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(20px) saturate(115%);
+    }
+
+    .hero h1 {
+      margin: 0 0 10px;
+      font-family: var(--display);
+      font-size: clamp(2.1rem, 4vw, 3.6rem);
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+      text-wrap: balance;
+    }
+
+    .hero p {
+      margin: 0;
+      max-width: 62ch;
+      color: var(--ink-soft);
+      font-size: 1rem;
+      line-height: 1.7;
+      text-wrap: pretty;
+    }
+
+    .hero-meta {
+      display: grid;
+      gap: 12px;
+      align-content: end;
+      justify-items: stretch;
+    }
+
+    .meta-card, .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: var(--panel);
+      box-shadow: 0 16px 38px rgba(43, 34, 24, 0.08);
+    }
+
+    .meta-card {
+      padding: 16px 18px;
+    }
+
+    .meta-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--ink-soft);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+    }
+
+    .meta-value {
+      font-size: 1.15rem;
+      font-weight: 700;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(420px, 0.95fr) minmax(0, 1.25fr);
+      gap: 22px;
+      margin-top: 22px;
+      align-items: start;
+    }
+
+    .panel {
+      padding: 22px;
+      overflow: hidden;
+    }
+
+    .panel h2,
+    .panel h3 {
+      margin: 0;
+      font-family: var(--display);
+      line-height: 1;
+      letter-spacing: -0.02em;
+    }
+
+    .panel h2 { font-size: 1.65rem; margin-bottom: 8px; }
+    .panel h3 { font-size: 1.15rem; }
+
+    .section-note {
+      margin: 0;
+      color: var(--ink-soft);
+      line-height: 1.6;
+      text-wrap: pretty;
+    }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .field {
+      display: grid;
+      gap: 7px;
+    }
+
+    .field-wide {
+      grid-column: 1 / -1;
+    }
+
+    label,
+    .field-label {
+      font-size: 0.86rem;
+      font-weight: 700;
+      color: var(--ink-soft);
+      letter-spacing: 0.02em;
+    }
+
+    input,
+    select,
+    textarea,
+    button {
+      font: inherit;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid rgba(54, 43, 29, 0.16);
+      border-radius: var(--radius-sm);
+      background: rgba(255, 255, 255, 0.78);
+      color: var(--ink);
+      transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+    }
+
+    input:focus,
+    select:focus,
+    textarea:focus {
+      outline: none;
+      border-color: rgba(148, 68, 36, 0.45);
+      box-shadow: 0 0 0 4px rgba(189, 103, 65, 0.12);
+      background: rgba(255, 255, 255, 0.96);
+    }
+
+    textarea {
+      min-height: 112px;
+      resize: vertical;
+      line-height: 1.55;
+    }
+
+    .hint {
+      color: var(--ink-soft);
+      font-size: 0.78rem;
+      line-height: 1.55;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .button {
+      appearance: none;
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 18px;
+      cursor: pointer;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      transition: transform 140ms ease, background 140ms ease, opacity 140ms ease;
+    }
+
+    .button:hover { transform: translateY(-1px); }
+    .button:disabled {
+      cursor: wait;
+      opacity: 0.66;
+      transform: none;
+    }
+
+    .button-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+      color: #fff9f5;
+      box-shadow: 0 16px 34px rgba(148, 68, 36, 0.22);
+    }
+
+    .button-secondary {
+      background: rgba(35, 46, 61, 0.08);
+      color: var(--ink);
+      border: 1px solid rgba(35, 46, 61, 0.08);
+    }
+
+    .pill-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(54, 43, 29, 0.14);
+      background: rgba(255,255,255,0.72);
+      color: var(--ink);
+      font-size: 0.86rem;
+    }
+
+    .pill input {
+      width: auto;
+      margin: 0;
+      padding: 0;
+      box-shadow: none;
+    }
+
+    .switch-line {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      width: fit-content;
+      color: var(--ink);
+      cursor: pointer;
+    }
+
+    .switch-line input {
+      width: auto;
+      margin: 0;
+      padding: 0;
+      box-shadow: none;
+    }
+
+    .status-band {
+      display: grid;
+      gap: 14px;
+    }
+
+    .status-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: capitalize;
+      background: rgba(35, 46, 61, 0.08);
+    }
+
+    .status-idle { color: var(--ink-soft); }
+    .status-running { color: var(--warn); background: rgba(178, 117, 26, 0.12); }
+    .status-succeeded { color: var(--ok); background: rgba(47, 125, 77, 0.12); }
+    .status-failed { color: var(--danger); background: rgba(162, 59, 59, 0.12); }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .summary-item {
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(255,255,255,0.68);
+    }
+
+    .summary-item strong {
+      display: block;
+      font-size: 1.3rem;
+      margin-bottom: 4px;
+    }
+
+    .summary-item span {
+      color: var(--ink-soft);
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .param-table-wrap,
+    .report-list {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(255,255,255,0.66);
+      overflow: hidden;
+    }
+
+    .param-table-wrap {
+      max-height: 460px;
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 12px 12px;
+      border-bottom: 1px solid rgba(54, 43, 29, 0.1);
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      background: rgba(247, 241, 232, 0.96);
+      z-index: 1;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ink-soft);
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    .unsupported-row { opacity: 0.58; }
+
+    .count-strip {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .count-badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.8);
+      border: 1px solid var(--line);
+      font-size: 0.82rem;
+      color: var(--ink-soft);
+    }
+
+    .log-box,
+    .console-box {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      background: #201a16;
+      color: #f9ead7;
+      font-family: var(--mono);
+      font-size: 0.84rem;
+      line-height: 1.6;
+      max-height: 220px;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .report-grid {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+    }
+
+    .report-card {
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border: 1px solid rgba(54, 43, 29, 0.1);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(255,255,255,0.8), rgba(255,249,243,0.92));
+    }
+
+    .report-card.active {
+      border-color: rgba(148, 68, 36, 0.28);
+      box-shadow: inset 0 0 0 1px rgba(148, 68, 36, 0.18);
+    }
+
+    .report-card h4 {
+      margin: 0;
+      font-size: 1rem;
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .report-meta {
+      color: var(--ink-soft);
+      font-size: 0.82rem;
+      display: flex;
+      gap: 8px 14px;
+      flex-wrap: wrap;
+    }
+
+    .artifact-links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .artifact-links a,
+    .artifact-links button {
+      text-decoration: none;
+      background: rgba(189, 103, 65, 0.1);
+      color: var(--accent-strong);
+      border: 1px solid rgba(189, 103, 65, 0.14);
+      padding: 8px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .artifact-links button {
+      cursor: pointer;
+      font: inherit;
+    }
+
+    .viewer-shell {
+      display: grid;
+      gap: 12px;
+    }
+
+    .viewer-frame {
+      width: 100%;
+      min-height: 720px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: white;
+    }
+
+    .maintenance-panel {
+      margin-top: 22px;
+    }
+
+    .maintenance-panel[hidden] {
+      display: none;
+    }
+
+    .maintenance-toggle-row {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 22px;
+    }
+
+    .maintenance-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .maintenance-path {
+      display: inline-flex;
+      align-items: center;
+      min-height: 40px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(54, 43, 29, 0.12);
+      background: rgba(255,255,255,0.78);
+      color: var(--ink-soft);
+      font-size: 0.78rem;
+      word-break: break-all;
+    }
+
+    .empty-state {
+      padding: 22px;
+      color: var(--ink-soft);
+      text-align: center;
+      line-height: 1.7;
+    }
+
+    .top-alert {
+      display: none;
+      margin-top: 18px;
+      padding: 14px 16px;
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(162, 59, 59, 0.2);
+      background: rgba(162, 59, 59, 0.08);
+      color: var(--danger);
+      font-weight: 700;
+    }
+
+    .top-alert.visible { display: block; }
+
+    @media (max-width: 1220px) {
+      .hero,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+      .summary-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .maintenance-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell {
+        width: min(100vw - 20px, 1680px);
+        margin: 12px auto 22px;
+      }
+      .hero,
+      .panel {
+        padding: 18px;
+      }
+      .form-grid,
+      .summary-strip {
+        grid-template-columns: 1fr;
+      }
+      th:nth-child(3),
+      td:nth-child(3),
+      th:nth-child(4),
+      td:nth-child(4) {
+        display: none;
+      }
+      .viewer-frame {
+        min-height: 520px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div>
+        <h1>DIY LLM Benchmark Control Room / DIY LLM Benchmark 控制台</h1>
+        <p>把原本 terminal 式設定流程收斂成一個單檔 HTML 控制台，左邊編 benchmark 配置，右邊直接看執行狀態、產物連結與歷史報告，不用來回切視窗。</p>
+      </div>
+      <div class="hero-meta">
+        <div class="meta-card">
+          <span class="meta-label">UI Mode / 介面模式</span>
+          <div class="meta-value">Single-file HTML / 單檔 HTML</div>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">Report Flow / 報告流程</span>
+          <div class="meta-value">Preview + download + history / 預覽 + 下載 + 歷史紀錄</div>
+        </div>
+      </div>
+    </section>
+
+    <div id="top-alert" class="top-alert"></div>
+
+    <main class="layout">
+      <section class="panel stack">
+        <div>
+          <h2>Benchmark Setup / 測試設定</h2>
+          <p class="section-note">保留原本 Python benchmark 核心，只把配置與操作面改成瀏覽器控制台。參數區會依 backend 自動顯示支援狀態。</p>
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
+            <label for="backend">Backend / 後端</label>
+            <select id="backend"></select>
+          </div>
+          <div class="field">
+            <label for="capability">Benchmark Mode / 測試模式</label>
+            <select id="capability"></select>
+          </div>
+          <div class="field field-wide">
+            <label for="base-url">Base URL / 基礎網址</label>
+            <input id="base-url" type="text" spellcheck="false">
+          </div>
+          <div class="field field-wide">
+            <span id="model-catalog-label" class="field-label">Detected Ollama Models / 偵測到的 Ollama 模型</span>
+            <div id="detected-models" class="pill-row"></div>
+            <div id="model-catalog-note" class="hint"></div>
+            <div class="button-row">
+              <button id="refresh-models" class="button button-secondary" type="button">Refresh Model List / 重新整理模型清單</button>
+            </div>
+          </div>
+          <div class="field field-wide">
+            <label for="models-input">Models / 模型</label>
+            <input id="models-input" type="text" spellcheck="false" placeholder="qwen3.5:latest, llama.cpp-model">
+            <div class="hint">用逗號分隔。llama.cpp 留空時會直接連線 Base URL，測試目前 llama-server 已載入的模型。</div>
+          </div>
+          <div id="llama-batch-switch-field" class="field field-wide" hidden>
+            <label class="switch-line" for="llama-cpp-auto-switch">
+              <input id="llama-cpp-auto-switch" type="checkbox" checked>
+              <span>Batch switch selected GGUF models / 自動依序切換所選 GGUF 並測試</span>
+            </label>
+            <div class="hint">有勾選模型時才會由 easy_llamacpp 逐一換模；未勾選時不換模，直接使用目前 Base URL 的 llama-server。</div>
+          </div>
+          <div class="field field-wide">
+            <label for="prompt-input">Benchmark Prompt / 測試提示</label>
+            <textarea id="prompt-input"></textarea>
+            <div id="prompt-hint" class="hint">This prompt is sent once per configuration. / 此提示會依每組設定送出一次。</div>
+          </div>
+          <div class="field field-wide">
+            <label for="system-prompts-input">System Prompt Variants / System Prompt 變體</label>
+            <textarea id="system-prompts-input" placeholder="每段 system prompt 之間用一行 --- 分隔"></textarea>
+            <div class="hint">留空表示不使用額外 system prompt。若有多段，請用單獨一行 <code>---</code> 分隔。</div>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div>
+            <h3>Parameter Matrix / 參數矩陣</h3>
+            <p class="section-note">支援欄位可直接勾選啟用，值欄延續原本 CSV 寫法，例如 <code>0.1, 0.8</code> 或 <code>enable, disable</code>。</p>
+          </div>
+          <div class="param-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Use / 啟用</th>
+                  <th>Key / 鍵</th>
+                  <th>Group / 群組</th>
+                  <th>Range / 範圍</th>
+                  <th>Values / 值</th>
+                </tr>
+              </thead>
+              <tbody id="param-table-body"></tbody>
+            </table>
+          </div>
+          <div id="param-summary" class="count-strip"></div>
+        </div>
+
+        <div class="button-row">
+          <button id="start-button" class="button button-primary" type="button">Start Benchmark / 開始測試</button>
+          <button id="refresh-reports" class="button button-secondary" type="button">Refresh Reports / 重新整理報告</button>
+          <button id="shutdown-ui" class="button button-secondary" type="button">Close Local UI / 關閉本機 UI</button>
+        </div>
+      </section>
+
+      <section class="stack">
+        <section class="panel status-band">
+          <div class="status-header">
+            <div>
+              <h2>Run Status / 執行狀態</h2>
+              <p id="job-message" class="section-note">Ready. / 就緒。</p>
+            </div>
+            <div id="job-status-chip" class="status-chip status-idle">idle / 就緒</div>
+          </div>
+
+          <div id="job-summary-strip" class="summary-strip"></div>
+
+          <div class="stack">
+            <div>
+              <h3>Progress Log / 進度紀錄</h3>
+            </div>
+            <div id="job-logs" class="log-box">No job started yet. / 尚未開始任務。</div>
+          </div>
+
+          <div class="stack">
+            <div>
+              <h3>Console Summary / 終端摘要</h3>
+            </div>
+            <div id="console-summary" class="console-box">Benchmark table output will appear here after a run. / 執行後會在這裡顯示 benchmark 表格摘要。</div>
+          </div>
+
+          <div>
+            <h3>Run Artifacts / 執行產物</h3>
+            <div id="run-artifacts" class="artifact-links"></div>
+          </div>
+        </section>
+
+        <section class="panel stack">
+          <div class="status-header">
+            <div>
+              <h2>Reports / 報告列表</h2>
+              <p class="section-note">這裡會列出最新產生的 HTML report，點選後可直接在下方預覽，也可以開新分頁或下載同一組產物。</p>
+            </div>
+          </div>
+          <div class="report-list">
+            <div id="report-list" class="report-grid"></div>
+          </div>
+        </section>
+
+        <section class="panel viewer-shell">
+          <div class="status-header">
+            <div>
+              <h2>Report Viewer / 報告檢視器</h2>
+              <p id="viewer-caption" class="section-note">Select a report to preview it here. / 請選擇一份報告在此預覽。</p>
+            </div>
+            <div id="viewer-actions" class="artifact-links"></div>
+          </div>
+          <iframe id="report-frame" class="viewer-frame" title="Benchmark report preview / Benchmark 報告預覽"></iframe>
+        </section>
+      </section>
+    </main>
+
+    <div class="maintenance-toggle-row">
+      <button
+        id="toggle-maintenance"
+        class="button button-secondary"
+        type="button"
+        aria-controls="maintenance-panel"
+        aria-expanded="false"
+      >Show Maintenance / 顯示維護設定</button>
+    </div>
+
+    <section id="maintenance-panel" class="panel stack maintenance-panel" hidden>
+      <div class="status-header">
+        <div>
+          <h2>Maintenance Page / 維護頁面</h2>
+          <p class="section-note">Edit and save the default values shown by the benchmark UI, including backend URLs, models, prompts, system prompts, and parameter presets. / 編輯並儲存 benchmark UI 顯示的預設值，包含後端網址、模型、prompt、system prompt 與參數預設。</p>
+        </div>
+        <div id="ui-defaults-path" class="maintenance-path"></div>
+      </div>
+
+      <div class="maintenance-grid">
+        <section class="stack">
+          <div class="form-grid">
+            <div class="field">
+              <label for="defaults-backend">Default Backend / 預設後端</label>
+              <select id="defaults-backend"></select>
+            </div>
+            <div class="field">
+              <label for="defaults-capability">Default Benchmark Mode / 預設測試模式</label>
+              <select id="defaults-capability"></select>
+            </div>
+          </div>
+
+          <div class="stack">
+            <div class="status-header">
+              <div>
+                <h3>Mode Defaults / 模式預設</h3>
+                <p class="section-note">Set the default prompt and default system prompt blocks for each benchmark mode. / 為每個 benchmark mode 設定預設 prompt 與預設 system prompt 區塊。</p>
+              </div>
+              <div class="field">
+                <label for="maintenance-capability">Mode / 模式</label>
+                <select id="maintenance-capability"></select>
+              </div>
+            </div>
+
+            <div class="field field-wide">
+              <label for="maintenance-prompt">Default Prompt / 預設 Prompt</label>
+              <textarea id="maintenance-prompt"></textarea>
+            </div>
+
+            <div class="field field-wide">
+              <label for="maintenance-system-prompts">Default System Prompts / 預設 System Prompts</label>
+              <textarea id="maintenance-system-prompts" placeholder="Separate each system prompt with a line containing --- / 每段 system prompt 之間用一行 --- 分隔"></textarea>
+              <div class="hint">Use <code>---</code> as the separator between multiple system prompt blocks. / 多段 system prompt 之間請使用 <code>---</code> 分隔。</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="stack">
+          <div class="status-header">
+            <div>
+              <h3>Backend Defaults / 後端預設</h3>
+              <p class="section-note">Set the default base URL, model list, and parameter matrix for each backend. / 為各後端設定預設 Base URL、模型清單與參數矩陣。</p>
+            </div>
+            <div class="field">
+              <label for="maintenance-backend">Backend / 後端</label>
+              <select id="maintenance-backend"></select>
+            </div>
+          </div>
+
+          <div class="form-grid">
+            <div class="field field-wide">
+              <label for="maintenance-base-url">Default Base URL / 預設 Base URL</label>
+              <input id="maintenance-base-url" type="text" spellcheck="false">
+            </div>
+            <div class="field field-wide">
+              <label for="maintenance-models">Default Models / 預設模型</label>
+              <input id="maintenance-models" type="text" spellcheck="false" placeholder="qwen3.5:latest, llama.cpp-model">
+            </div>
+          </div>
+
+          <div class="stack">
+            <div>
+              <h3>Default Parameter Matrix / 預設參數矩陣</h3>
+              <p class="section-note">These values become the initial parameter table state when the main benchmark page loads. / 這些值會成為主 benchmark 頁面初次載入時的參數表格狀態。</p>
+            </div>
+            <div class="param-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Use / 啟用</th>
+                    <th>Key / 鍵</th>
+                    <th>Group / 群組</th>
+                    <th>Range / 範圍</th>
+                    <th>Values / 值</th>
+                  </tr>
+                </thead>
+                <tbody id="maintenance-param-table-body"></tbody>
+              </table>
+            </div>
+            <div id="maintenance-param-summary" class="count-strip"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="button-row">
+        <button id="save-ui-defaults" class="button button-primary" type="button">Save UI Defaults / 儲存 UI 預設</button>
+        <button id="reload-ui-defaults" class="button button-secondary" type="button">Reload Saved Defaults / 重新載入已儲存預設</button>
+        <button id="reset-ui-defaults" class="button button-secondary" type="button">Reset Built-in Defaults / 還原內建預設</button>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const appState = {
+      capabilityDefaults: {},
+      capabilitySystemPromptDefaults: {},
+      backendState: null,
+      backendCatalog: {},
+      uiDefaults: null,
+      maintenanceDraft: null,
+      job: null,
+      reports: [],
+      activeReportId: null,
+      lastPromptDefault: "",
+      lastSystemPromptsDefault: "",
+      reportRefreshToken: "",
+    };
+
+    const els = {
+      alert: document.getElementById("top-alert"),
+      backend: document.getElementById("backend"),
+      capability: document.getElementById("capability"),
+      baseUrl: document.getElementById("base-url"),
+      llamaBatchSwitchField: document.getElementById("llama-batch-switch-field"),
+      llamaCppAutoSwitch: document.getElementById("llama-cpp-auto-switch"),
+      modelCatalogLabel: document.getElementById("model-catalog-label"),
+      modelCatalogNote: document.getElementById("model-catalog-note"),
+      detectedModels: document.getElementById("detected-models"),
+      refreshModels: document.getElementById("refresh-models"),
+      modelsInput: document.getElementById("models-input"),
+      promptInput: document.getElementById("prompt-input"),
+      promptHint: document.getElementById("prompt-hint"),
+      systemPromptsInput: document.getElementById("system-prompts-input"),
+      paramBody: document.getElementById("param-table-body"),
+      paramSummary: document.getElementById("param-summary"),
+      startButton: document.getElementById("start-button"),
+      refreshReports: document.getElementById("refresh-reports"),
+      shutdownUi: document.getElementById("shutdown-ui"),
+      jobStatusChip: document.getElementById("job-status-chip"),
+      jobMessage: document.getElementById("job-message"),
+      jobSummaryStrip: document.getElementById("job-summary-strip"),
+      jobLogs: document.getElementById("job-logs"),
+      consoleSummary: document.getElementById("console-summary"),
+      runArtifacts: document.getElementById("run-artifacts"),
+      reportList: document.getElementById("report-list"),
+      reportFrame: document.getElementById("report-frame"),
+      viewerCaption: document.getElementById("viewer-caption"),
+      viewerActions: document.getElementById("viewer-actions"),
+      toggleMaintenance: document.getElementById("toggle-maintenance"),
+      maintenancePanel: document.getElementById("maintenance-panel"),
+      uiDefaultsPath: document.getElementById("ui-defaults-path"),
+      defaultsBackend: document.getElementById("defaults-backend"),
+      defaultsCapability: document.getElementById("defaults-capability"),
+      maintenanceCapability: document.getElementById("maintenance-capability"),
+      maintenancePrompt: document.getElementById("maintenance-prompt"),
+      maintenanceSystemPrompts: document.getElementById("maintenance-system-prompts"),
+      maintenanceBackend: document.getElementById("maintenance-backend"),
+      maintenanceBaseUrl: document.getElementById("maintenance-base-url"),
+      maintenanceModels: document.getElementById("maintenance-models"),
+      maintenanceParamBody: document.getElementById("maintenance-param-table-body"),
+      maintenanceParamSummary: document.getElementById("maintenance-param-summary"),
+      saveUiDefaults: document.getElementById("save-ui-defaults"),
+      reloadUiDefaults: document.getElementById("reload-ui-defaults"),
+      resetUiDefaults: document.getElementById("reset-ui-defaults"),
+    };
+
+    const statusLabels = {
+      idle: "idle / 就緒",
+      running: "running / 執行中",
+      succeeded: "succeeded / 完成",
+      failed: "failed / 失敗",
+    };
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          ...(options.headers || {}),
+        },
+      });
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!response.ok) {
+        throw new Error(data.error || "Request failed. / 請求失敗。");
+      }
+      return data;
+    }
+
+    function showAlert(message) {
+      if (!message) {
+        els.alert.classList.remove("visible");
+        els.alert.textContent = "";
+        return;
+      }
+      els.alert.textContent = message;
+      els.alert.classList.add("visible");
+    }
+
+    function setMaintenancePanelVisible(isVisible) {
+      els.maintenancePanel.hidden = !isVisible;
+      els.toggleMaintenance.setAttribute("aria-expanded", String(isVisible));
+      els.toggleMaintenance.textContent = isVisible
+        ? "Hide Maintenance / 隱藏維護設定"
+        : "Show Maintenance / 顯示維護設定";
+    }
+
+    function cloneData(value) {
+      return JSON.parse(JSON.stringify(value ?? null));
+    }
+
+    function parseSystemPromptBlocks(text) {
+      const normalized = String(text || "").replace(/\\r\\n/g, "\\n").trim();
+      if (!normalized) {
+        return [];
+      }
+      return normalized
+        .split(/\\n\\s*---\\s*\\n/g)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    function formatSystemPromptBlocks(prompts) {
+      const items = Array.isArray(prompts)
+        ? prompts.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      return items.join("\\n---\\n");
+    }
+
+    function currentParamValuesFor(bodyEl) {
+      const rowMap = new Map();
+      bodyEl.querySelectorAll("tr[data-param-key]").forEach((row) => {
+        const key = row.dataset.paramKey;
+        const enabled = row.querySelector("input[type='checkbox']")?.checked || false;
+        const rawValue = row.querySelector("input[type='text']")?.value || "";
+        rowMap.set(key, { enabled, rawValue });
+      });
+      return rowMap;
+    }
+
+    function renderParamSummaryFor(bodyEl, summaryEl) {
+      const rows = [...bodyEl.querySelectorAll("tr[data-param-key]")];
+      let selectedCount = 0;
+      let comboCount = 1;
+      let hasError = false;
+
+      rows.forEach((row) => {
+        const checkbox = row.querySelector("input[type='checkbox']");
+        const valueInput = row.querySelector("input[type='text']");
+        if (!checkbox || checkbox.disabled || !checkbox.checked) {
+          return;
+        }
+
+        selectedCount += 1;
+        const parts = String(valueInput.value || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (!parts.length) {
+          hasError = true;
+          return;
+        }
+        comboCount *= parts.length;
+      });
+
+      const badges = [
+        `<div class="count-badge">Selected Params / 已選參數: <strong>${selectedCount}</strong></div>`,
+        `<div class="count-badge">Combination Count / 組合數量: <strong>${hasError ? "ERR" : comboCount}</strong></div>`,
+      ];
+      summaryEl.innerHTML = badges.join("");
+    }
+
+    function renderDetectedModels(models) {
+      const backendState = appState.backendState || {};
+      els.llamaBatchSwitchField.hidden = backendState.backend !== "llama.cpp";
+      els.modelCatalogLabel.textContent = backendState.model_catalog_label || "Detected Models / 偵測到的模型";
+      els.modelCatalogNote.textContent = backendState.model_catalog_note || "";
+      if (!models || !models.length) {
+        const isLlamaCpp = backendState.backend === "llama.cpp";
+        els.detectedModels.innerHTML = isLlamaCpp
+          ? '<div class="hint">No GGUF catalog entries found. You can still leave Models empty to test the model currently served by llama.cpp. / 找不到 GGUF 模型索引；仍可留空並直接測試目前 llama.cpp 模型。</div>'
+          : '<div class="hint">No Ollama models detected right now. / 目前沒有偵測到 Ollama 模型。</div>';
+        return;
+      }
+
+      const selected = new Set(
+        String(els.modelsInput.value || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      );
+
+      els.detectedModels.innerHTML = models.map((item) => {
+        const model = typeof item === "string" ? { name: item, available: true } : item;
+        const name = String(model.name || "").trim();
+        const path = String(model.path || "").trim();
+        const suffix = model.available === false ? " (missing)" : "";
+        return `
+        <label class="pill">
+          <input type="checkbox" value="${escapeHtml(name)}" ${selected.has(name) ? "checked" : ""}>
+          <span title="${escapeHtml(path)}">${escapeHtml(name + suffix)}</span>
+        </label>
+      `;
+      }).join("");
+
+      els.detectedModels.querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
+        checkbox.addEventListener("change", syncModelsFromDetectedSelection);
+      });
+    }
+
+    function syncModelsFromDetectedSelection() {
+      const selected = [...els.detectedModels.querySelectorAll("input[type='checkbox']:checked")]
+        .map((checkbox) => checkbox.value.trim())
+        .filter(Boolean);
+      els.modelsInput.value = selected.join(", ");
+    }
+
+    function buildRowsWithParamDefaults(rows, paramDefaults) {
+      return (rows || []).map((row) => {
+        const overrideValues = paramDefaults?.[row.key] || {};
+        return {
+          ...row,
+          enabled: row.supported ? Boolean(overrideValues.enabled ?? row.enabled) : false,
+          raw_value: row.supported
+            ? String(overrideValues.raw_value ?? row.raw_value ?? row.default_value)
+            : row.default_value,
+        };
+      });
+    }
+
+    function renderParamRowsInto(bodyEl, summaryEl, rows, { onInputChange = null, preserveCurrentValues = false } = {}) {
+      const currentValues = preserveCurrentValues ? currentParamValuesFor(bodyEl) : new Map();
+      bodyEl.innerHTML = (rows || []).map((row) => {
+        const preserved = currentValues.get(row.key) || {};
+        const enabled = row.supported
+          ? (Object.prototype.hasOwnProperty.call(preserved, "enabled") ? preserved.enabled : row.enabled)
+          : false;
+        const rawValue = row.supported
+          ? (Object.prototype.hasOwnProperty.call(preserved, "rawValue") ? preserved.rawValue : (row.raw_value ?? row.default_value))
+          : row.default_value;
+
+        return `
+          <tr data-param-key="${escapeHtml(row.key)}" class="${row.supported ? "" : "unsupported-row"}">
+            <td>
+              <input type="checkbox" ${enabled ? "checked" : ""} ${row.supported ? "" : "disabled"}>
+            </td>
+            <td>
+              <strong>${escapeHtml(row.key)}</strong><br>
+              <span class="hint">${escapeHtml(row.label)}</span>
+            </td>
+            <td>${escapeHtml(row.group)}</td>
+            <td>
+              ${escapeHtml(row.range_text)}<br>
+              <span class="hint">${row.supported ? "Supported / 支援" : "Unsupported on this backend / 此後端不支援"}</span>
+            </td>
+            <td>
+              <input type="text" value="${escapeHtml(rawValue)}" ${row.supported ? "" : "disabled"}>
+              <div class="hint">${escapeHtml(row.desc)}</div>
+            </td>
+          </tr>
+        `;
+      }).join("");
+
+      bodyEl.querySelectorAll("input").forEach((input) => {
+        input.addEventListener("input", () => {
+          renderParamSummaryFor(bodyEl, summaryEl);
+          if (onInputChange) {
+            onInputChange();
+          }
+        });
+        input.addEventListener("change", () => {
+          renderParamSummaryFor(bodyEl, summaryEl);
+          if (onInputChange) {
+            onInputChange();
+          }
+        });
+      });
+      renderParamSummaryFor(bodyEl, summaryEl);
+    }
+
+    async function loadBackendState(backend, { preserveUrl = false, preserveModels = false } = {}) {
+      const data = await fetchJson(`/api/backend-state?backend=${encodeURIComponent(backend)}`);
+      const previousUrl = els.baseUrl.value.trim();
+      const previousModels = els.modelsInput.value.trim();
+      appState.backendCatalog[backend] = data;
+      appState.backendState = data;
+      if (!preserveUrl || !previousUrl) {
+        els.baseUrl.value = data.default_url || "";
+      }
+      if (!preserveModels || !previousModels) {
+        els.modelsInput.value = data.default_models_text || "";
+      }
+      renderDetectedModels(data.detected_models || []);
+      renderParamRowsInto(els.paramBody, els.paramSummary, data.param_rows || []);
+    }
+
+    function collectParamPayloadFromBody(bodyEl) {
+      const params = {};
+      bodyEl.querySelectorAll("tr[data-param-key]").forEach((row) => {
+        const key = row.dataset.paramKey;
+        params[key] = {
+          enabled: row.querySelector("input[type='checkbox']")?.checked || false,
+          raw_value: row.querySelector("input[type='text']")?.value || "",
+        };
+      });
+      return params;
+    }
+
+    function collectParamPayload() {
+      return collectParamPayloadFromBody(els.paramBody);
+    }
+
+    function updateMaintenanceGeneralDraft() {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      appState.maintenanceDraft.default_backend = els.defaultsBackend.value || "llama.cpp";
+      appState.maintenanceDraft.default_capability = els.defaultsCapability.value || "chat";
+    }
+
+    function flushMaintenanceCapabilityDraft(targetCapability = null) {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      const capability = targetCapability || appState.activeMaintenanceCapability || els.maintenanceCapability.value;
+      if (!capability) {
+        return;
+      }
+      appState.maintenanceDraft.capability_defaults = appState.maintenanceDraft.capability_defaults || {};
+      appState.maintenanceDraft.capability_defaults[capability] = {
+        prompt: String(els.maintenancePrompt.value || "").trim() || appState.capabilityDefaults[capability] || "",
+        system_prompts: parseSystemPromptBlocks(els.maintenanceSystemPrompts.value),
+      };
+    }
+
+    function flushMaintenanceBackendDraft(targetBackend = null) {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      const backend = targetBackend || appState.activeMaintenanceBackend || els.maintenanceBackend.value;
+      if (!backend) {
+        return;
+      }
+      const fallbackState = appState.backendCatalog?.[backend] || {};
+      appState.maintenanceDraft.backend_defaults = appState.maintenanceDraft.backend_defaults || {};
+      appState.maintenanceDraft.backend_defaults[backend] = {
+        url: String(els.maintenanceBaseUrl.value || "").trim() || fallbackState.default_url || "",
+        models: String(els.maintenanceModels.value || "").trim(),
+        params: collectParamPayloadFromBody(els.maintenanceParamBody),
+      };
+    }
+
+    function renderMaintenanceCapabilityEditor() {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      const capability = els.maintenanceCapability.value || appState.maintenanceDraft.default_capability || "chat";
+      const draftValues = appState.maintenanceDraft.capability_defaults?.[capability] || {};
+      appState.activeMaintenanceCapability = capability;
+      els.maintenancePrompt.value = draftValues.prompt || appState.capabilityDefaults[capability] || "";
+      els.maintenanceSystemPrompts.value = formatSystemPromptBlocks(draftValues.system_prompts || []);
+    }
+
+    function renderMaintenanceBackendEditor() {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      const backend = els.maintenanceBackend.value || appState.maintenanceDraft.default_backend || "llama.cpp";
+      const backendState = appState.backendCatalog?.[backend] || { param_rows: [] };
+      const draftValues = appState.maintenanceDraft.backend_defaults?.[backend] || {};
+      appState.activeMaintenanceBackend = backend;
+      els.maintenanceBaseUrl.value = draftValues.url || backendState.default_url || "";
+      els.maintenanceModels.value = draftValues.models || backendState.default_models_text || "";
+      renderParamRowsInto(
+        els.maintenanceParamBody,
+        els.maintenanceParamSummary,
+        buildRowsWithParamDefaults(backendState.param_rows || [], draftValues.params || {}),
+        { onInputChange: () => flushMaintenanceBackendDraft(backend) }
+      );
+    }
+
+    function renderMaintenanceEditors() {
+      if (!appState.maintenanceDraft) {
+        return;
+      }
+      els.uiDefaultsPath.textContent = `Defaults file / 預設檔: ${appState.uiDefaultsPath || ""}`;
+      els.defaultsBackend.value = appState.maintenanceDraft.default_backend || "llama.cpp";
+      els.defaultsCapability.value = appState.maintenanceDraft.default_capability || "chat";
+
+      if (!els.maintenanceBackend.value || !appState.backendCatalog?.[els.maintenanceBackend.value]) {
+        els.maintenanceBackend.value = appState.maintenanceDraft.default_backend || "llama.cpp";
+      }
+      if (!els.maintenanceCapability.value || !appState.capabilityDefaults?.[els.maintenanceCapability.value]) {
+        els.maintenanceCapability.value = appState.maintenanceDraft.default_capability || "chat";
+      }
+      renderMaintenanceCapabilityEditor();
+      renderMaintenanceBackendEditor();
+    }
+
+    function maybeApplyCapabilityDefaults(force = false) {
+      const nextPromptDefault = appState.capabilityDefaults[els.capability.value] || "";
+      const nextSystemPromptsDefault = appState.capabilitySystemPromptDefaults[els.capability.value] || "";
+      const isBuiltInSuite = ["suite-smoke-7", "local-expert-battle-48"].includes(els.capability.value);
+      const currentPromptValue = els.promptInput.value.trim();
+      const currentSystemPromptsValue = els.systemPromptsInput.value.trim();
+
+      if (force || !currentPromptValue || currentPromptValue === appState.lastPromptDefault) {
+        els.promptInput.value = nextPromptDefault;
+      }
+      if (force || !currentSystemPromptsValue || currentSystemPromptsValue === appState.lastSystemPromptsDefault) {
+        els.systemPromptsInput.value = nextSystemPromptsDefault;
+      }
+      appState.lastPromptDefault = nextPromptDefault;
+      appState.lastSystemPromptsDefault = nextSystemPromptsDefault;
+      els.promptInput.disabled = isBuiltInSuite;
+      els.promptHint.textContent = isBuiltInSuite
+        ? (els.capability.value === "local-expert-battle-48"
+          ? "Local Expert Battle runs 48 fixed questions and loads 2–3K-character excerpts from ~/wiki; the prompt cannot be edited here. / Local Expert Battle 會執行 48 題固定題目，並自 ~/wiki 擷取 2–3K 字，提示不可修改。"
+          : "Built-in suite-smoke-7 runs seven fixed questions; the prompt cannot be edited here. / 內建 suite-smoke-7 會執行七道固定題目，此處不可修改。")
+        : "This prompt is sent once per configuration. / 此提示會依每組設定送出一次。";
+    }
+
+    function applyUiDefaultsPayload(data, { applyToBenchmark = false } = {}) {
+      appState.uiDefaults = cloneData(data.ui_defaults || {});
+      appState.maintenanceDraft = cloneData(data.ui_defaults || {});
+      appState.backendCatalog = cloneData(data.backend_catalog || {});
+      appState.capabilityDefaults = { ...(data.capability_defaults || {}) };
+      appState.capabilitySystemPromptDefaults = { ...(data.capability_system_prompt_defaults || {}) };
+      appState.uiDefaultsPath = data.ui_defaults_path || "";
+      renderMaintenanceEditors();
+
+      if (applyToBenchmark) {
+        const defaultBackend = appState.uiDefaults?.default_backend || "llama.cpp";
+        const defaultCapability = appState.uiDefaults?.default_capability || "chat";
+        els.backend.value = defaultBackend;
+        els.capability.value = defaultCapability;
+        const backendState = appState.backendCatalog?.[defaultBackend];
+        if (backendState) {
+          appState.backendState = backendState;
+          els.baseUrl.value = backendState.default_url || "";
+          els.modelsInput.value = backendState.default_models_text || "";
+          renderDetectedModels(backendState.detected_models || []);
+          renderParamRowsInto(els.paramBody, els.paramSummary, backendState.param_rows || []);
+        }
+        maybeApplyCapabilityDefaults(true);
+      }
+    }
+
+    function collectConfigPayload() {
+      return {
+        backend: els.backend.value,
+        capability: els.capability.value,
+        url: els.baseUrl.value.trim(),
+        models: els.modelsInput.value.trim(),
+        llama_cpp_auto_switch: els.backend.value === "llama.cpp" && els.llamaCppAutoSwitch.checked,
+        prompt: els.promptInput.value,
+        system_prompts: els.systemPromptsInput.value,
+        params: collectParamPayload(),
+      };
+    }
+
+    function renderArtifactLinks(container, links, extraActions = []) {
+      const parts = [];
+      (links || []).forEach((link) => {
+        parts.push(`<a href="${escapeHtml(link.url)}" target="_blank" rel="noreferrer">${escapeHtml(link.label)}</a>`);
+      });
+      extraActions.forEach((action) => {
+        parts.push(`<button type="button" data-action="${escapeHtml(action.action)}">${escapeHtml(action.label)}</button>`);
+      });
+      container.innerHTML = parts.join("");
+    }
+
+    function renderJobSummary(job) {
+      if (!job || !job.result || !job.result.counts) {
+        els.jobSummaryStrip.innerHTML = "";
+        return;
+      }
+      const counts = job.result.counts;
+      els.jobSummaryStrip.innerHTML = `
+        <div class="summary-item"><strong>${counts.ok}</strong><span>OK / 正常</span></div>
+        <div class="summary-item"><strong>${counts.warning}</strong><span>Warning / 警告</span></div>
+        <div class="summary-item"><strong>${counts.error}</strong><span>Error / 錯誤</span></div>
+        <div class="summary-item"><strong>${escapeHtml(job.result.config_summary?.estimated_run_count ?? job.result.config_summary?.combination_count ?? "-")}</strong><span>Runs / 執行數</span></div>
+      `;
+    }
+
+    function maybePreviewLatestReport(job) {
+      const latestReport = job?.result?.latest_report;
+      if (!latestReport || !latestReport.html_url) {
+        return;
+      }
+      if (appState.activeReportId === latestReport.id) {
+        return;
+      }
+      previewReport(latestReport.id);
+    }
+
+    function renderJob(job) {
+      appState.job = job;
+      const status = job?.status || "idle";
+      els.jobStatusChip.className = `status-chip status-${status}`;
+      els.jobStatusChip.textContent = statusLabels[status] || status;
+      els.jobMessage.textContent = job?.message || "Ready. / 就緒。";
+
+      const logLines = job?.logs?.length ? job.logs.join("\\n") : "No job started yet. / 尚未開始任務。";
+      els.jobLogs.textContent = logLines;
+
+      const errorText = job?.error ? `${job.error}` : "";
+      if (errorText) {
+        showAlert(errorText);
+      } else {
+        showAlert("");
+      }
+
+      renderJobSummary(job);
+
+      if (job?.result?.console_summary_text) {
+        els.consoleSummary.textContent = job.result.console_summary_text;
+      } else {
+        els.consoleSummary.textContent = "Benchmark table output will appear here after a run. / 執行後會在這裡顯示 benchmark 表格摘要。";
+      }
+
+      renderArtifactLinks(els.runArtifacts, job?.result?.artifact_links || []);
+
+      const running = status === "running";
+      els.startButton.disabled = running;
+      els.startButton.textContent = running
+        ? "Benchmark Running... / 測試執行中..."
+        : "Start Benchmark / 開始測試";
+
+      if (status === "succeeded") {
+        maybePreviewLatestReport(job);
+      }
+    }
+
+    function renderReportList(reports) {
+      appState.reports = reports || [];
+      if (!appState.reports.length) {
+        els.reportList.innerHTML = '<div class="empty-state">No saved HTML reports yet. Start a benchmark run and the latest report will appear here. / 目前還沒有已儲存的 HTML 報告。開始一次 benchmark 後，最新報告會顯示在這裡。</div>';
+        return;
+      }
+
+      els.reportList.innerHTML = appState.reports.map((report) => `
+        <article class="report-card ${appState.activeReportId === report.id ? "active" : ""}" data-report-id="${escapeHtml(report.id)}">
+          <div>
+            <h4>${escapeHtml(report.title)}</h4>
+            <div class="report-meta">
+              <span>${escapeHtml(report.modified_at)}</span>
+              <span>${escapeHtml(report.size_kib)} KiB</span>
+            </div>
+          </div>
+          <div class="artifact-links">
+            <button type="button" data-preview-report="${escapeHtml(report.id)}">Preview / 預覽</button>
+            <a href="${escapeHtml(report.html_url)}" target="_blank" rel="noreferrer">Open / 開啟</a>
+          </div>
+        </article>
+      `).join("");
+
+      els.reportList.querySelectorAll("[data-preview-report]").forEach((button) => {
+        button.addEventListener("click", () => previewReport(button.dataset.previewReport));
+      });
+    }
+
+    function previewReport(reportId) {
+      const report = appState.reports.find((item) => item.id === reportId);
+      if (!report) {
+        return;
+      }
+      appState.activeReportId = report.id;
+      els.reportFrame.src = report.html_url;
+      els.viewerCaption.textContent = `${report.title} / ${report.modified_at}`;
+      renderArtifactLinks(els.viewerActions, report.artifact_links || []);
+      renderReportList(appState.reports);
+    }
+
+    async function refreshReports({ preserveSelection = true } = {}) {
+      const data = await fetchJson(`/api/reports?token=${encodeURIComponent(String(Date.now()))}`);
+      renderReportList(data.reports || []);
+      if (!preserveSelection && data.reports?.length) {
+        previewReport(data.reports[0].id);
+        return;
+      }
+      if (preserveSelection && appState.activeReportId) {
+        const stillExists = data.reports?.some((report) => report.id === appState.activeReportId);
+        if (stillExists) {
+          previewReport(appState.activeReportId);
+          return;
+        }
+      }
+      if (!appState.activeReportId && data.reports?.length) {
+        previewReport(data.reports[0].id);
+      }
+    }
+
+    async function refreshJob() {
+      const data = await fetchJson(`/api/job?token=${encodeURIComponent(String(Date.now()))}`);
+      const previousStatus = appState.job?.status;
+      renderJob(data.job);
+      if (previousStatus === "running" && data.job?.status !== "running") {
+        await refreshReports({ preserveSelection: false });
+      }
+    }
+
+    async function startBenchmark() {
+      try {
+        showAlert("");
+        els.startButton.disabled = true;
+        const payload = collectConfigPayload();
+        const data = await fetchJson("/api/start-benchmark", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        renderJob(data.job);
+      } catch (error) {
+        els.startButton.disabled = false;
+        showAlert(error.message);
+      }
+    }
+
+    async function reloadUiDefaults() {
+      const data = await fetchJson("/api/ui-defaults");
+      applyUiDefaultsPayload(data, { applyToBenchmark: true });
+    }
+
+    async function saveUiDefaults() {
+      updateMaintenanceGeneralDraft();
+      flushMaintenanceCapabilityDraft();
+      flushMaintenanceBackendDraft();
+      const data = await fetchJson("/api/ui-defaults", {
+        method: "POST",
+        body: JSON.stringify(appState.maintenanceDraft || {}),
+      });
+      applyUiDefaultsPayload(data, { applyToBenchmark: true });
+    }
+
+    async function resetUiDefaults() {
+      const data = await fetchJson("/api/ui-defaults/reset", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      applyUiDefaultsPayload(data, { applyToBenchmark: true });
+    }
+
+    async function shutdownUi() {
+      try {
+        await fetchJson("/api/shutdown", { method: "POST", body: JSON.stringify({}) });
+        els.shutdownUi.disabled = true;
+        els.startButton.disabled = true;
+        els.jobMessage.textContent = "Local UI is shutting down... / 本機 UI 正在關閉...";
+      } catch (error) {
+        showAlert(error.message);
+      }
+    }
+
+    async function bootstrap() {
+      try {
+        const data = await fetchJson("/api/bootstrap");
+        const backendOptionsHtml = (data.backends || []).map((item) => `
+          <option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>
+        `).join("");
+        const capabilityOptionsHtml = (data.capabilities || []).map((item) => `
+          <option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>
+        `).join("");
+        els.backend.innerHTML = backendOptionsHtml;
+        els.defaultsBackend.innerHTML = backendOptionsHtml;
+        els.maintenanceBackend.innerHTML = backendOptionsHtml;
+        els.capability.innerHTML = capabilityOptionsHtml;
+        els.defaultsCapability.innerHTML = capabilityOptionsHtml;
+        els.maintenanceCapability.innerHTML = capabilityOptionsHtml;
+
+        applyUiDefaultsPayload(data, { applyToBenchmark: true });
+        renderJob(data.job);
+        renderReportList(data.reports || []);
+        if (data.reports?.length) {
+          previewReport(data.reports[0].id);
+        }
+
+        els.backend.addEventListener("change", async () => {
+          try {
+            await loadBackendState(els.backend.value, { preserveUrl: false, preserveModels: false });
+          } catch (error) {
+            showAlert(error.message);
+          }
+        });
+
+        els.capability.addEventListener("change", () => maybeApplyCapabilityDefaults(false));
+        els.refreshModels.addEventListener("click", async () => {
+          try {
+            await loadBackendState(els.backend.value, { preserveUrl: true, preserveModels: true });
+          } catch (error) {
+            showAlert(error.message);
+          }
+        });
+        els.modelsInput.addEventListener("input", () => {
+          renderDetectedModels(appState.backendState?.detected_models || []);
+        });
+        els.refreshReports.addEventListener("click", () => refreshReports({ preserveSelection: true }).catch((error) => showAlert(error.message)));
+        els.startButton.addEventListener("click", startBenchmark);
+        els.shutdownUi.addEventListener("click", shutdownUi);
+        els.defaultsBackend.addEventListener("change", updateMaintenanceGeneralDraft);
+        els.defaultsCapability.addEventListener("change", updateMaintenanceGeneralDraft);
+        els.maintenanceCapability.addEventListener("change", () => {
+          flushMaintenanceCapabilityDraft(appState.activeMaintenanceCapability);
+          renderMaintenanceCapabilityEditor();
+        });
+        els.maintenanceBackend.addEventListener("change", () => {
+          flushMaintenanceBackendDraft(appState.activeMaintenanceBackend);
+          renderMaintenanceBackendEditor();
+        });
+        els.maintenancePrompt.addEventListener("input", () => flushMaintenanceCapabilityDraft());
+        els.maintenanceSystemPrompts.addEventListener("input", () => flushMaintenanceCapabilityDraft());
+        els.maintenanceBaseUrl.addEventListener("input", () => flushMaintenanceBackendDraft());
+        els.maintenanceModels.addEventListener("input", () => flushMaintenanceBackendDraft());
+        els.saveUiDefaults.addEventListener("click", () => saveUiDefaults().catch((error) => showAlert(error.message)));
+        els.reloadUiDefaults.addEventListener("click", () => reloadUiDefaults().catch((error) => showAlert(error.message)));
+        els.resetUiDefaults.addEventListener("click", () => resetUiDefaults().catch((error) => showAlert(error.message)));
+
+        setInterval(() => {
+          refreshJob().catch((error) => showAlert(error.message));
+        }, 1600);
+      } catch (error) {
+        showAlert(error.message);
+      }
+    }
+
+    els.toggleMaintenance.addEventListener("click", () => {
+      setMaintenancePanelVisible(els.maintenancePanel.hidden);
+    });
+    setMaintenancePanelVisible(false);
+    bootstrap();
+  </script>
+</body>
+</html>
+"""
+
+
+def run_web_benchmark_job(app_state, job_id, config):
+    try:
+        result = run_benchmark_workflow(
+            config,
+            progress_callback=lambda message: app_state.append_log(job_id, message),
+        )
+        for warning_text in result.get("warnings", []):
+            app_state.append_log(job_id, warning_text)
+        app_state.complete_job(job_id, result)
+    except Exception as exc:
+        traceback.print_exc()
+        app_state.fail_job(job_id, f"{type(exc).__name__}: {exc}")
+
+
+class BenchmarkWebUiRequestHandler(BaseHTTPRequestHandler):
+    server_version = "DIYLLMBenchmarkUI/1.0"
+
+    def log_message(self, _format, *_args):
+        return
+
+    @property
+    def app_state(self):
+        return self.server.app_state
+
+    @property
+    def report_root(self):
+        return self.server.report_root
+
+    def _send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_html(self, html_text, status=200):
+        body = html_text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, file_path):
+        target_path = Path(file_path)
+        body = target_path.read_bytes()
+        content_type = mimetypes.guess_type(target_path.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type == "application/json":
+            content_type += "; charset=utf-8"
+
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json_body(self):
+        content_length = int(self.headers.get("Content-Length", "0") or "0")
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        if not raw_body.strip():
+            return {}
+        return json.loads(raw_body.decode("utf-8"))
+
+    def _not_found(self):
+        self._send_json({"error": "Not found."}, status=404)
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/":
+            self._send_html(build_single_file_benchmark_ui_html())
+            return
+
+        if parsed.path == "/api/bootstrap":
+            self._send_json(build_web_ui_bootstrap_payload(self.app_state))
+            return
+
+        if parsed.path == "/api/backend-state":
+            query = parse_qs(parsed.query)
+            backend = (query.get("backend") or [DEFAULT_BACKEND])[0]
+            self._send_json(build_web_ui_backend_state(backend))
+            return
+
+        if parsed.path == "/api/ui-defaults":
+            self._send_json(build_ui_defaults_api_payload())
+            return
+
+        if parsed.path == "/api/job":
+            self._send_json({"job": self.app_state.snapshot()})
+            return
+
+        if parsed.path == "/api/reports":
+            self._send_json({"reports": list_report_entries(self.report_root)})
+            return
+
+        if parsed.path.startswith("/report-files/"):
+            file_name = unquote(parsed.path.removeprefix("/report-files/"))
+            if not file_name or Path(file_name).name != file_name:
+                self._not_found()
+                return
+            target_path = self.report_root / file_name
+            if not target_path.exists() or not target_path.is_file():
+                self._not_found()
+                return
+            self._send_file(target_path)
+            return
+
+        self._not_found()
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+
+        if parsed.path == "/api/start-benchmark":
+            try:
+                payload = self._read_json_body()
+                config = normalize_web_ui_config(payload)
+                job_id = self.app_state.start_job(config)
+                worker = threading.Thread(
+                    target=run_web_benchmark_job,
+                    args=(self.app_state, job_id, config),
+                    daemon=True,
+                )
+                worker.start()
+                self._send_json({"job": self.app_state.snapshot()}, status=202)
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/ui-defaults":
+            try:
+                payload = self._read_json_body()
+                saved_defaults = save_ui_defaults(payload)
+                self._send_json(build_ui_defaults_api_payload(saved_defaults))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/ui-defaults/reset":
+            try:
+                reset_defaults = reset_ui_defaults()
+                self._send_json(build_ui_defaults_api_payload(reset_defaults))
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if parsed.path == "/api/shutdown":
+            self._send_json({"ok": True})
+            threading.Thread(target=self.server.shutdown, daemon=True).start()
+            return
+
+        self._not_found()
+
+
+def launch_single_file_benchmark_ui():
+    report_root = ensure_report_output_dir().resolve()
+    app_state = BenchmarkWebUiState()
+    server = None
+    for port_offset in range(DEFAULT_UI_PORT_SCAN_LIMIT):
+        candidate_port = DEFAULT_UI_PORT + port_offset
+        try:
+            server = ThreadingHTTPServer((DEFAULT_UI_HOST, candidate_port), BenchmarkWebUiRequestHandler)
+            break
+        except OSError:
+            continue
+    if server is None:
+        server = ThreadingHTTPServer((DEFAULT_UI_HOST, 0), BenchmarkWebUiRequestHandler)
+    server.daemon_threads = True
+    server.app_state = app_state
+    server.report_root = report_root
+
+    url = f"http://{DEFAULT_UI_HOST}:{server.server_address[1]}/"
+    launch_hint_path = persist_ui_launch_hint(url, report_root)
+    print("\n" + "=" * 62)
+    print("DIY LLM Benchmark | Single-file HTML UI")
+    print("=" * 62)
+    print(f"UI URL: {url}")
+    print(f"Report directory: {report_root}")
+    print(f"Launch hint file: {launch_hint_path.resolve()}")
+    print("Press Ctrl-C in this terminal to stop the local UI server.")
+
+    browser_opened, browser_error = try_open_browser(url)
+    if browser_opened:
+        print("Browser auto-open: OK")
+    else:
+        print("Browser auto-open: failed")
+        print(f"Open this URL manually: {url}")
+        print(f"Browser error: {browser_error}")
+    if not sys.stdin.isatty():
+        threading.Thread(
+            target=show_windows_info_dialog,
+            args=(
+                "llm_expert_bench UI Ready",
+                build_ui_launch_message(url, report_root, launch_hint_path, browser_opened),
+            ),
+            daemon=True,
+        ).start()
+
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def interactive_config():
     print("\n" + "=" * 62)
-    print("LLM Benchmark / LLM 基準測試")
+    print("LLM Benchmark")
     print("=" * 62)
     state = {}
     stage_index = 0
@@ -5755,7 +8703,7 @@ def interactive_config():
     while True:
         if stage_index == 0:
             backend = ask_select_with_back(
-                "Select backend / 選擇後端:",
+                "Select backend:",
                 choices=[
                     Choice("Ollama", value="ollama"),
                     Choice("llama.cpp (llama-server)", value="llama.cpp"),
@@ -5774,10 +8722,18 @@ def interactive_config():
 
         if stage_index == 1:
             capability = ask_select_with_back(
-                "Select benchmark mode / 選擇 benchmark 模式:",
+                "Select benchmark mode:",
                 choices=[
-                    Choice("Chat | Standard chat response benchmark / 一般文字回覆測試", value="chat"),
-                    Choice("Tools | Check whether the model emits tool_calls / 檢查是否輸出 tool_calls", value="tools"),
+                    Choice("Chat | Standard chat response benchmark", value="chat"),
+                    Choice("Tools | Check whether the model emits tool_calls", value="tools"),
+                    Choice(
+                        "Suite Smoke 7 | Seven fixed capability questions / 七項能力固定題庫",
+                        value="suite-smoke-7",
+                    ),
+                    Choice(
+                        "Local Expert Battle 48 | PLC、工程計算、繁中與 wiki 摘要",
+                        value=LOCAL_EXPERT_BATTLE_SUITE_ID,
+                    ),
                 ],
                 default=state.get("capability"),
             )
@@ -5803,7 +8759,7 @@ def interactive_config():
                 continue
             url, models = model_result
             if not models:
-                print("No models are available. Cancelled. / 沒有可用模型，已取消。")
+                print("No models available. Cancelled.")
                 return None
             state["url"] = url
             state["models"] = models
@@ -5813,7 +8769,7 @@ def interactive_config():
         if stage_index == 3:
             final_params = edit_param_grid(state["backend"], initial_params=state.get("params"))
             if final_params is None:
-                print("Parameter grid was cancelled. / 參數表設定已取消。")
+                print("Parameter grid cancelled.")
                 return None
             if final_params == BACK_ACTION:
                 stage_index = 2
@@ -5823,8 +8779,12 @@ def interactive_config():
             continue
 
         if stage_index == 4:
+            if state["capability"] in BUILTIN_SUITES:
+                state["prompt"] = CAPABILITY_DEFAULTS[state["capability"]]
+                stage_index = 5
+                continue
             prompt = ask_text_with_back(
-                "Benchmark prompt / 測試 prompt:",
+                "Benchmark prompt:",
                 default=state.get("prompt", CAPABILITY_DEFAULTS[state["capability"]]),
             )
             if prompt is None:
@@ -5841,7 +8801,7 @@ def interactive_config():
             if system_prompts is None:
                 return None
             if system_prompts == BACK_ACTION:
-                stage_index = 4
+                stage_index = 3 if state["capability"] in BUILTIN_SUITES else 4
                 continue
             state["system_prompts"] = system_prompts
             stage_index = 6
@@ -5859,7 +8819,7 @@ def interactive_config():
 
         print_config_review(config)
         confirmed = ask_confirm_with_back(
-            "Start benchmark with this configuration? / 要用這份設定開始 benchmark 嗎？",
+            "Start benchmark with this configuration?",
             default=True,
         )
         if confirmed is None:
@@ -5868,85 +8828,49 @@ def interactive_config():
             stage_index = 5
             continue
         if not confirmed:
-            print("Cancelled before benchmark run. / 已在 benchmark 開始前取消。")
+            print("Cancelled before benchmark run.")
             return None
         return config
 
 
 def main():
+    launch_single_file_benchmark_ui()
+
+
+def main_cli():
     config = interactive_config()
     if not config:
         return
 
-    results_df = run_bench(config)
-    if results_df.empty:
-        print("No benchmark rows were produced.")
-        return
-
-    ok_count = int((results_df["Status"] == "ok").sum())
-    warning_count = int((results_df["Status"] == "warning").sum())
-    error_count = int((results_df["Status"] == "error").sum())
-    capability = config.get("capability", "chat")
-    report_dir = ensure_report_output_dir()
-    report_stem = report_dir / f"bench_{config['backend']}_{capability}_{time.strftime('%Y%m%d_%H%M%S')}"
-
-    raw_outputs_path = save_raw_outputs(results_df, report_stem)
+    result = run_benchmark_workflow(config)
 
     print("\n" + "=" * 62)
-    console_df = build_console_summary_dataframe(results_df)
-    print(dataframe_to_text_table(console_df))
-    print(f"\nResult counts / 結果統計: ok={ok_count}, warning={warning_count}, error={error_count}")
-
-    report_path = None
-    chart_path = None
-    summary_excel_path = None
-
-    try:
-        summary_excel_path = save_summary_excel_workbook(results_df, config, report_stem)
-    except Exception as exc:
-        print(f"Summary Excel export failed / Summary Excel 匯出失敗: {exc}")
-
-    try:
-        report_path = save_markdown_report(
-            results_df,
-            config,
-            report_stem,
-            summary_excel_path=summary_excel_path,
-        )
-    except Exception as exc:
-        print(f"Report generation failed / 報告產生失敗: {exc}")
-
-    try:
-        chart_path = plot_results(results_df, f"{report_stem}.png", capability=capability)
-    except Exception as exc:
-        print(f"Chart generation failed / 圖表產生失敗: {exc}")
-
-    try:
-        export_best_config(results_df, config, output_dir=report_dir)
-    except Exception as exc:
-        print(f"best_config export failed / best_config 匯出失敗: {exc}")
-
-    print(f"\nSaved artifacts directory / 輸出資料夾: {report_dir}")
-    if report_path:
-        print(f"\nSaved report / 已儲存報告: {report_path}")
-    else:
-        print("\nMarkdown report was not saved. / HTML 報告未成功輸出。")
-    if summary_excel_path:
-        print(f"Saved summary Excel / 已儲存 Summary Excel: {summary_excel_path}")
-
-    print(f"Saved raw outputs / 已儲存原始輸出: {raw_outputs_path}")
-    if chart_path:
-        print(f"Saved chart / 已儲存圖表: {chart_path}")
-    else:
-        print("Skipped chart output because there were no eligible successful results. / 因為沒有可繪圖的成功結果，所以略過圖表輸出。")
+    print(result["console_summary_text"])
+    counts = result["counts"]
+    print(
+        f"\nResult counts: ok={counts['ok']}, warning={counts['warning']}, error={counts['error']}"
+    )
+    print(f"Saved artifacts directory: {result['report_dir']}")
+    for link in result.get("artifact_links", []):
+        print(f"- {link['label']}: {link['name']}")
+    if result.get("warnings"):
+        print("\nWarnings:")
+        for warning_text in result["warnings"]:
+            print(f"- {warning_text}")
 
 if __name__ == "__main__":
     exit_code = 0
     try:
-        ensure_runtime_ready()
-        main()
+        # Explorer and shortcuts may start the script from an unrelated working directory.
+        os.chdir(Path(__file__).resolve().parent)
+        use_cli_mode = "--cli" in sys.argv
+        ensure_runtime_ready(require_questionary=use_cli_mode)
+        if use_cli_mode:
+            main_cli()
+        else:
+            main()
     except KeyboardInterrupt:
-        print("\nExecution cancelled. / 已取消執行。")
+        print("\n已取消執行。")
     except Exception as exc:
         exit_code = 1
         handle_fatal_error(exc)
