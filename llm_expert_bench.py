@@ -191,58 +191,57 @@ SUITE_QUESTION_REQUIRED_FIELDS = (
 SUITE_SMOKE_7 = {
     "id": "suite-smoke-7",
     "version": "1.0.0",
-    "title": "Seven-skill smoke suite / 七項能力冒煙測試",
+    "title": "七項能力冒煙測試",
     "description": (
-        "One fixed question each for math, logic, reasoning, reading, translation, "
-        "writing, and coding. / 數學、邏輯、推理、閱讀、翻譯、寫作與程式各一題。"
+        "數學、邏輯、推理、閱讀、翻譯、寫作與程式設計各一題固定題目。"
     ),
     "question_schema": {
-        "id": "Stable question identifier / 穩定題目識別碼",
-        "category": "Machine-readable skill category / 機器可讀能力分類",
-        "title": "Bilingual short title / 中英雙語短標題",
-        "prompt": "Complete user prompt sent to the model / 實際送給模型的完整提示",
-        "expected_output": "Reference answer or expected response shape / 參考答案或預期輸出形式",
-        "evaluation_guide": "Manual or future automatic scoring guidance / 人工或未來自動評分準則",
+        "id": "穩定的題目識別碼",
+        "category": "供程式辨識的能力分類",
+        "title": "繁體中文短標題",
+        "prompt": "實際送給模型的完整題目",
+        "expected_output": "參考答案或預期輸出形式",
+        "evaluation_guide": "人工或自動評分準則",
     },
     "questions": [
         {
             "id": "smoke7-math-01",
             "category": "math",
-            "title": "Discount and tax / 折扣與稅額",
+            "title": "折扣與稅額",
             "prompt": (
                 "一件商品原價 800 元，先打 85 折，再針對折後價格加收 5% 稅金。"
                 "請列出計算式，並以兩位小數給出最後應付金額。"
             ),
             "expected_output": "800 × 0.85 × 1.05 = 714.00 元。",
-            "evaluation_guide": "The calculation and final amount 714.00 must both be correct.",
+            "evaluation_guide": "計算過程與最終金額 714.00 都必須正確。",
         },
         {
             "id": "smoke7-logic-01",
             "category": "logic",
-            "title": "Truth-teller puzzle / 誠實者邏輯題",
+            "title": "誠實者邏輯題",
             "prompt": (
                 "A 說：「B 在說謊。」B 說：「我們兩個都在說謊。」已知每個人不是永遠說真話，"
                 "就是永遠說假話。請判斷 A、B 各是哪一種人，並用兩句話說明理由。"
             ),
             "expected_output": "A 說真話，B 說假話。",
-            "evaluation_guide": "The conclusion must be A truthful and B lying, with a consistent explanation.",
+            "evaluation_guide": "結論必須是 A 說真話、B 說假話，且解釋前後一致。",
         },
         {
             "id": "smoke7-reasoning-01",
             "category": "reasoning",
-            "title": "Access-chain reasoning / 權限鏈推理",
+            "title": "權限鏈推理",
             "prompt": (
                 "所有金屬鑰匙都放在紅盒中；紅盒放在上鎖的櫃子裡。小美可以進入放置櫃子的房間，"
                 "但經理不在場時不能打開任何上鎖物件。今天經理不在。小美今天能拿到金屬鑰匙嗎？"
                 "請依條件逐步回答，不要加入題目沒有提供的假設。"
             ),
             "expected_output": "不能；她雖能進房間，但無權打開上鎖的櫃子，因此無法取得紅盒內鑰匙。",
-            "evaluation_guide": "The answer must be no and connect room access, the locked cabinet, and manager absence.",
+            "evaluation_guide": "答案必須為不能，並正確串連房間進入權、上鎖櫃子與經理不在場三項條件。",
         },
         {
             "id": "smoke7-reading-01",
             "category": "reading",
-            "title": "Short-passage comprehension / 短文理解",
+            "title": "短文理解",
             "prompt": (
                 "閱讀短文：『工廠把夜間冷卻水泵改為依溫度自動調速後，用電量下降 18%。"
                 "不過在第一週，兩次溫度感測器誤報讓泵浦全速運轉。工程團隊因此加入雙感測器交叉驗證，"
@@ -250,12 +249,12 @@ SUITE_SMOKE_7 = {
                 "(2) 團隊為何加入雙感測器交叉驗證？每題各用一句話。"
             ),
             "expected_output": "(1) 水泵改為依溫度自動調速。(2) 為避免單一感測器誤報使泵浦全速運轉。",
-            "evaluation_guide": "Both answers must be grounded only in the passage and preserve the causal relationship.",
+            "evaluation_guide": "兩個答案都只能依據短文內容，且必須保留正確因果關係。",
         },
         {
             "id": "smoke7-translation-01",
             "category": "translation",
-            "title": "Technical translation / 技術翻譯",
+            "title": "技術翻譯",
             "prompt": (
                 "請把下列繁體中文翻譯成自然、精確的英文，只輸出譯文；保留 GPU、24 GB 與 128k context "
                 "三個技術標記不變：『這張 GPU 有 24 GB 記憶體，但啟用 128k context 時仍須留意 KV cache 的成長。』"
@@ -264,30 +263,30 @@ SUITE_SMOKE_7 = {
                 "This GPU has 24 GB of memory, but KV cache growth still needs to be monitored "
                 "when 128k context is enabled."
             ),
-            "evaluation_guide": "Meaning must be accurate, English natural, and all three required markers preserved.",
+            "evaluation_guide": "語意須正確、英文自然，且完整保留三個指定技術標記。",
         },
         {
             "id": "smoke7-writing-01",
             "category": "writing",
-            "title": "Concise professional writing / 精簡商務寫作",
+            "title": "精簡商務寫作",
             "prompt": (
                 "請用繁體中文寫一封簡短專業郵件，通知團隊明天下午 3 點的模型部署延後到後天下午 2 點。"
                 "內容必須包含主旨、延後原因是『驗證尚未完成』、向收件者致歉，以及請大家回覆是否能配合新時間。"
                 "全文控制在 120 個中文字以內。"
             ),
-            "expected_output": "A concise Traditional Chinese email containing all four required elements and the new time.",
-            "evaluation_guide": "Check subject, both times, stated reason, apology, reply request, tone, and length constraint.",
+            "expected_output": "一封精簡的繁體中文郵件，包含四項指定內容與新的部署時間。",
+            "evaluation_guide": "檢查主旨、原時間與新時間、延後原因、致歉、回覆請求、語氣及字數限制。",
         },
         {
             "id": "smoke7-coding-01",
             "category": "coding",
-            "title": "Order-preserving deduplication / 保序去重",
+            "title": "保留順序的去重函式",
             "prompt": (
                 "請用 Python 實作 `dedupe_keep_order(items)`：移除重複項目但保留第一次出現的順序，"
                 "時間複雜度需為 O(n)。請提供型別標註、函式本體與一個輸入輸出範例，不要使用外部套件。"
             ),
-            "expected_output": "A valid O(n) Python implementation using a seen set plus an ordered result list.",
-            "evaluation_guide": "Code must be valid, preserve first occurrence order, use type hints, and include one example.",
+            "expected_output": "有效的 O(n) Python 實作，使用已出現集合與保留順序的結果串列。",
+            "evaluation_guide": "程式碼必須有效、保留首次出現順序、具有型別標註，並附上一個範例。",
         },
     ],
 }
@@ -412,18 +411,18 @@ TOOL_BENCHMARK_TOOLS = [
         "type": "function",
         "function": {
             "name": "lookup_weather",
-            "description": "Look up the current weather for a city.",
+            "description": "查詢指定城市目前的天氣。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "city": {
                         "type": "string",
-                        "description": "City name in Chinese or English.",
+                        "description": "城市名稱，可使用中文或英文。",
                     },
                     "unit": {
                         "type": "string",
                         "enum": ["celsius", "fahrenheit"],
-                        "description": "Preferred temperature unit.",
+                        "description": "偏好的溫度單位。",
                     },
                 },
                 "required": ["city"],
@@ -814,8 +813,8 @@ def build_benchmark_messages(capability, prompt, system_prompt_text=""):
             {
                 "role": "system",
                 "content": (
-                    "You are being benchmarked for tool calling. "
-                    "If a suitable tool is provided, call the tool before answering."
+                    "你正在接受工具呼叫能力測試。若有適合的工具可用，"
+                    "請先呼叫工具，再依工具結果回答。"
                 ),
             }
         )
@@ -3545,10 +3544,13 @@ def main():
 
 def interactive_config():
     capability_defaults = {
-        "chat": "Explain the long-term creep risk of PETG in 3D printing and how to reduce it.",
+        "chat": (
+            "請說明 3D 列印使用 PETG 時，長期受力下的潛變（creep）風險，"
+            "以及實際可行的改善方式。"
+        ),
         "tools": (
-            "Check today's weather in Taipei. If you support tools or function calling, "
-            "call the `lookup_weather` tool first instead of answering directly."
+            "請查詢台北今天的天氣。若你支援工具或函式呼叫，"
+            "請先呼叫 `lookup_weather` 工具，不要直接回答。"
         ),
     }
 
@@ -3619,7 +3621,7 @@ def interactive_config():
             final_params[key] = values
 
     prompt = questionary.text(
-        "Benchmark prompt:",
+        "測試題目：",
         default=capability_defaults[capability],
     ).ask()
     if prompt is None:
@@ -5390,19 +5392,20 @@ from dataclasses import dataclass
 
 
 CAPABILITY_DEFAULTS = {
-    "chat": "Explain the long-term creep risk of PETG in 3D printing and how to reduce it.",
+    "chat": (
+        "請說明 3D 列印使用 PETG 時，長期受力下的潛變（creep）風險，"
+        "以及實際可行的改善方式。"
+    ),
     "tools": (
-        "Check today's weather in Taipei. If you support tools or function calling, "
-        "call the `lookup_weather` tool first instead of answering directly."
+        "請查詢台北今天的天氣。若你支援工具或函式呼叫，"
+        "請先呼叫 `lookup_weather` 工具，不要直接回答。"
     ),
     "suite-smoke-7": (
-        "Built-in suite-smoke-7 uses seven fixed questions. / "
         "內建 suite-smoke-7 會依序執行七道固定題目。"
     ),
     LOCAL_EXPERT_BATTLE_SUITE_ID: (
-        "Built-in Local Expert Battle runs 48 fixed questions: PLC, engineering calculations, "
-        "Traditional Chinese context, and long summaries grounded in ~/wiki. / "
-        "內建 Local Expert Battle 會執行 48 題固定題目，長文摘要直接擷取 ~/wiki。"
+        "內建在地工程專家對戰會執行 48 題固定題目，涵蓋 PLC、工程計算、"
+        "繁中語境，以及直接擷取 ~/wiki 內容的長文摘要。"
     ),
 }
 
@@ -8784,7 +8787,7 @@ def interactive_config():
                 stage_index = 5
                 continue
             prompt = ask_text_with_back(
-                "Benchmark prompt:",
+                "測試題目：",
                 default=state.get("prompt", CAPABILITY_DEFAULTS[state["capability"]]),
             )
             if prompt is None:
