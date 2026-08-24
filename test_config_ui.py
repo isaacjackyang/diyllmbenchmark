@@ -1,3 +1,4 @@
+import re
 import unittest
 
 import llm_expert_bench as bench
@@ -26,6 +27,24 @@ class ConfigUiTests(unittest.TestCase):
         self.assertEqual(
             bench.build_web_ui_backend_state("invalid-backend")["backend"],
             "llama.cpp",
+        )
+
+    def test_builtin_prompts_and_smoke_questions_are_traditional_chinese_first(self):
+        defaults = bench.build_builtin_ui_defaults()["capability_defaults"]
+
+        self.assertTrue(defaults["chat"]["prompt"].startswith("請說明"))
+        self.assertTrue(defaults["tools"]["prompt"].startswith("請查詢"))
+        self.assertTrue(defaults["suite-smoke-7"]["prompt"].startswith("內建"))
+        for question in bench.SUITE_SMOKE_7["questions"]:
+            self.assertRegex(question["title"], re.compile(r"[\u4e00-\u9fff]"))
+            self.assertRegex(question["prompt"], re.compile(r"[\u4e00-\u9fff]"))
+            self.assertRegex(question["evaluation_guide"], re.compile(r"[\u4e00-\u9fff]"))
+
+        tool_messages = bench.build_benchmark_messages("tools", "請查詢台北天氣")
+        self.assertTrue(tool_messages[0]["content"].startswith("你正在接受工具呼叫能力測試"))
+        self.assertEqual(
+            bench.TOOL_BENCHMARK_TOOLS[0]["function"]["description"],
+            "查詢指定城市目前的天氣。",
         )
 
     def test_build_param_rows_marks_supported_and_locked_params(self):

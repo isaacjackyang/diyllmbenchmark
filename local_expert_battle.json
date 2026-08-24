@@ -1,15 +1,15 @@
 {
   "id": "local-expert-battle-48",
   "version": "1.0.0",
-  "title": "Local Expert Battle 48 / 在地工程專家對戰",
+  "title": "在地工程專家對戰 48 題",
   "description": "48 題本地模型能力對戰：PLC、工程計算、繁中語境、以本機 wiki 為依據的長文摘要，各 12 題。",
   "question_schema": {
-    "id": "Stable question identifier",
+    "id": "穩定的題目識別碼",
     "category": "plc | engineering_calculation | traditional_chinese | long_summary",
-    "title": "Short Traditional Chinese title",
-    "prompt": "Complete prompt, or a prompt template for a wiki excerpt",
-    "expected_output": "Reference answer or scoring target",
-    "evaluation_guide": "Manual or automatic scoring guidance"
+    "title": "繁體中文短標題",
+    "prompt": "完整題目，或供 wiki 摘錄使用的題目範本",
+    "expected_output": "參考答案或評分目標",
+    "evaluation_guide": "人工或自動評分準則"
   },
   "questions": [
     {"id":"plc-01","category":"plc","title":"ST 上升沿單次計數","prompt":"以下 ST 每個掃描週期都會執行。sensor 在兩個掃描週期都為 TRUE，為何 count 會加 2？請改寫成只在 FALSE→TRUE 時加一次的 IEC 61131-3 ST，並說明 reset 的優先順序。\nIF sensor THEN count := count + 1; END_IF;\nIF reset THEN count := 0; END_IF;","expected_output":"以 R_TRIG 或前一掃描值做上升沿，reset 優先，sensor 持續 TRUE 時只加一次。","evaluation_guide":"人工：程式可編譯、上升沿正確、reset 優先且解釋掃描週期。"},
